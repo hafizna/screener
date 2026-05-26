@@ -15,6 +15,18 @@ Signals are then enriched with confluence flags: near day VWAP, near previous-da
 
 This mirrors the `long_signal` / `short_signal` lines of `market_profile_tpo_v6_vwap_cloud_bands.pine` faithfully — same half-open TPO interval logic, same CBOT value-area builder, same Z thresholds.
 
+## How to read the dashboard
+
+- **TF**: candle timeframe that produced the signal.
+- **Side**: long means a bullish rejection from support-like levels; short means a bearish rejection from resistance-like levels.
+- **Z**: volume abnormality on the trigger candle. `LG` is large volume, `EX` is extreme volume.
+- **Trigger**: the market-profile level touched by the trigger candle wick. `PREV_` means the level comes from the previous UTC day.
+- **Level touched**: the exact price of that trigger level.
+- **Bar close**: the close price of the trigger candle. For a long, the candle should reject upward from the touched level; for a short, it should reject downward.
+- **Confluence**: optional extra context such as VWAP, previous-day high, or previous-day low.
+
+Signals are only treated as actionable for one candle after the trigger candle closes. The dashboard keeps the latest scan in storage, but hides expired signals automatically on refresh so old setups do not look fresh.
+
 ## What it does not do
 
 - **No backtest.** The screener tells you "this setup exists right now" not "this setup has worked historically." That's the next thing to add. Until then, paper-trade or size very small.

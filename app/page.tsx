@@ -10,6 +10,12 @@ type ApiResponse = (ScanResult & { stale: boolean; ageMs: number }) | {
   message: string;
 };
 
+const TIMEFRAME_MS: Record<Timeframe, number> = {
+  "15m": 15 * 60_000,
+  "30m": 30 * 60_000,
+  "1h": 60 * 60_000,
+};
+
 export default function DashboardPage() {
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -42,15 +48,23 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, []);
 
-  const filtered = useMemo<Signal[]>(() => {
+  const activeSignals = useMemo<Signal[]>(() => {
     if (!data || !("signals" in data) || data.signals.length === 0) return [];
-    return data.signals.filter((s) => {
+    return data.signals.filter((s) => isSignalActive(s, Date.now()));
+  }, [data]);
+
+  const expiredCount =
+    data && data.scannedAt !== null ? data.signals.length - activeSignals.length : 0;
+
+  const filtered = useMemo<Signal[]>(() => {
+    if (activeSignals.length === 0) return [];
+    return activeSignals.filter((s) => {
       if (!tfFilter.has(s.timeframe)) return false;
       if (sideFilter !== "all" && s.side !== sideFilter) return false;
       if (s.zLevel < minZ) return false;
       return true;
     });
-  }, [data, tfFilter, sideFilter, minZ]);
+  }, [activeSignals, tfFilter, sideFilter, minZ]);
 
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100 p-6">
@@ -74,7 +88,8 @@ export default function DashboardPage() {
           }`}
         >
           Last scan: {new Date(data.scannedAt).toLocaleString()} ·{" "}
-          {data.symbolsScanned} symbols · {data.signals.length} raw signals
+          {data.symbolsScanned} symbols · {activeSignals.length} active signals
+          {expiredCount > 0 && ` · ${expiredCount} expired hidden`}
           {data.stale && " · stale, check cron"}
           {data.symbolsErrored.length > 0 && ` · ${data.symbolsErrored.length} errors`}
         </div>
@@ -261,6 +276,14 @@ function tradingViewUrl(s: Signal): string {
 
 function binanceFuturesUrl(symbol: string): string {
   return `https://www.binance.com/en/futures/${symbol}`;
+}
+
+function isSignalActive(signal: Signal, now: number): boolean {
+  return now < signalExpiresAt(signal);
+}
+
+function signalExpiresAt(signal: Signal): number {
+  return signal.barTime + TIMEFRAME_MS[signal.timeframe] * 2;
 }
 
 function ZBadge({ level, z }: { level: 1 | 2 | 3; z: number }) {
