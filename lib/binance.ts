@@ -67,6 +67,7 @@ export async function fetchKlines(
     close: parseFloat(r[4] as string),
     volume: parseFloat(r[5] as string),
     closeTime: r[6] as number,
+    takerBuyVolume: parseFloat(r[9] as string),
   }));
 
   // IMPORTANT: drop the last bar if it's still in progress (closeTime > now).
@@ -108,6 +109,76 @@ export async function fetchTopSymbolsByVolume(
 
   usdtPairs.sort((a, b) => b.quoteVolume - a.quoteVolume);
   return usdtPairs.slice(0, limit).map((d) => d.symbol);
+}
+
+export interface OISnapshot {
+  openInterest: number; // sumOpenInterest in base asset
+  timestamp: number;
+}
+
+// Fetch recent OI history for a single symbol. Period matches the entry timeframe
+// so each data point corresponds to one candle. Weight: 1 per call.
+// Note: endpoint lives under /futures/data/, not /fapi/v1/.
+export async function fetchOIHistory(
+  symbol: string,
+  limit = 4,
+  signal?: AbortSignal
+): Promise<OISnapshot[]> {
+  const url = `${FAPI_BASE}/futures/data/openInterestHist?symbol=${symbol}&period=15m&limit=${limit}`;
+  let res: Response;
+  try {
+    res = await fetch(url, { signal, cache: "no-store" });
+  } catch (e) {
+    throw new Error(`Network error fetching OI history for ${symbol}: ${(e as Error).message}`);
+  }
+  if (!res.ok) throw new Error(`OI history failed for ${symbol}: ${res.status}`);
+  const data = (await res.json()) as Array<{
+    symbol: string;
+    sumOpenInterest: string;
+    sumOpenInterestValue: string;
+    timestamp: number;
+  }>;
+  return data.map((d) => ({
+    openInterest: parseFloat(d.sumOpenInterest),
+    timestamp: d.timestamp,
+  }));
+}
+
+export interface FundingRateInfo {
+  lastFundingRate: number; // decimal, e.g. 0.0001 = +0.01% per 8h; positive = longs pay
+  markPrice: number;
+  nextFundingTime: number;
+}
+
+// Single call (weight 10) that returns current funding rate + mark price for every
+// USDT-M perpetual. Much cheaper than per-symbol calls.
+export async function fetchFundingRates(signal?: AbortSignal): Promise<Map<string, FundingRateInfo>> {
+  const url = `${FAPI_BASE}/fapi/v1/premiumIndex`;
+  let res: Response;
+  try {
+    res = await fetch(url, { signal, cache: "no-store" });
+  } catch (e) {
+    throw new Error(`Network error fetching premiumIndex: ${(e as Error).message}`);
+  }
+  if (!res.ok) throw new Error(`premiumIndex failed: ${res.status}`);
+  const data = (await res.json()) as Array<{
+    symbol: string;
+    markPrice: string;
+    lastFundingRate: string;
+    nextFundingTime: number;
+  }>;
+  const map = new Map<string, FundingRateInfo>();
+  for (const d of data) {
+    if (!d.symbol.endsWith("USDT")) continue;
+    const fr = parseFloat(d.lastFundingRate);
+    if (!isFinite(fr)) continue;
+    map.set(d.symbol, {
+      lastFundingRate: fr,
+      markPrice: parseFloat(d.markPrice),
+      nextFundingTime: d.nextFundingTime,
+    });
+  }
+  return map;
 }
 
 // Run a list of async tasks with bounded concurrency. Critical for staying
