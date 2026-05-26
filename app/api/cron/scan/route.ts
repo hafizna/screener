@@ -91,12 +91,14 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // 4. Rank: HTF agreement + FR alignment first, then higher Z.
+  // 4. Rank: HTF agreement + FR + delta alignment, then higher Z.
   signals.sort((a, b) => {
     const frWeight = (sig: Signal) =>
       sig.frBias === "favorable" ? 1 : sig.frBias === "unfavorable" ? -1 : 0;
-    const scoreA = (a.biasScore4h ?? 0) + (a.biasScore1h ?? 0) + frWeight(a);
-    const scoreB = (b.biasScore4h ?? 0) + (b.biasScore1h ?? 0) + frWeight(b);
+    const deltaWeight = (sig: Signal) =>
+      sig.deltaBias === "aligned" ? 1 : sig.deltaBias === "opposed" ? -1 : 0;
+    const scoreA = (a.biasScore4h ?? 0) + (a.biasScore1h ?? 0) + frWeight(a) + deltaWeight(a);
+    const scoreB = (b.biasScore4h ?? 0) + (b.biasScore1h ?? 0) + frWeight(b) + deltaWeight(b);
     if (scoreB !== scoreA) return scoreB - scoreA;
     if (b.zLevel !== a.zLevel) return b.zLevel - a.zLevel;
     return Math.abs(b.zScore) - Math.abs(a.zScore);

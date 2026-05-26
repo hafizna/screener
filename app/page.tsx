@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { FRBias, ScanResult, Signal, Timeframe } from "@/lib/types";
+import type { DeltaBias, FRBias, ScanResult, Signal, Timeframe } from "@/lib/types";
 
 type ApiResponse = (ScanResult & { stale: boolean; ageMs: number }) | {
   scannedAt: null;
@@ -203,6 +203,8 @@ function SignalTable({ signals }: { signals: Signal[] }) {
             <th className="px-3 py-2 font-normal">HTF bias</th>
             <th className="px-3 py-2 font-normal">Z</th>
             <th className="px-3 py-2 font-normal" title="Last settled funding rate. Positive = longs pay; negative = shorts pay.">FR</th>
+            <th className="px-3 py-2 font-normal text-right" title="Fraction of trigger bar volume that were taker buy orders.">Buy%</th>
+            <th className="px-3 py-2 font-normal">Conf</th>
             <th className="px-3 py-2 font-normal">Trigger</th>
             <th
               className="px-3 py-2 font-normal text-right"
@@ -253,6 +255,16 @@ function SignalTable({ signals }: { signals: Signal[] }) {
                 ) : (
                   <span className="text-neutral-600">—</span>
                 )}
+              </td>
+              <td className="px-3 py-2 text-right">
+                {s.takerBuyRatio !== undefined ? (
+                  <DeltaBadge ratio={s.takerBuyRatio} bias={s.deltaBias} side={s.side} />
+                ) : (
+                  <span className="text-neutral-600">—</span>
+                )}
+              </td>
+              <td className="px-3 py-2">
+                <ConfBadges signal={s} />
               </td>
               <td className="px-3 py-2 text-neutral-300">{s.triggerLevel}</td>
               <td className="px-3 py-2 text-right tabular-nums text-neutral-400">
@@ -314,6 +326,43 @@ function signalExpiresAt(signal: Signal): number {
 function formatBias(signal: Signal): string {
   if (!signal.bias4h || !signal.bias1h) return "-";
   return `4H ${signal.bias4h} / 1H ${signal.bias1h}`;
+}
+
+function DeltaBadge({ ratio, bias, side }: { ratio: number; bias?: DeltaBias; side: "long" | "short" }) {
+  const pct = Math.round(ratio * 100);
+  // Color relative to whether the pressure aligns with the signal direction.
+  const styles =
+    bias === "aligned"
+      ? side === "long" ? "text-emerald-400" : "text-pink-400"
+      : bias === "opposed"
+      ? "text-red-400"
+      : "text-neutral-400";
+  return (
+    <span className={`tabular-nums text-xs ${styles}`} title={`Taker buy ratio: ${pct}% of bar volume were aggressive buys`}>
+      {pct}%
+    </span>
+  );
+}
+
+function ConfBadges({ signal }: { signal: Signal }) {
+  const flags: { label: string; title: string }[] = [];
+  if (signal.nearVwap) flags.push({ label: "VWAP", title: "Bar close within tolerance of session VWAP" });
+  if (signal.nearPdh)  flags.push({ label: "PDH",  title: "Bar touched previous-day high" });
+  if (signal.nearPdl)  flags.push({ label: "PDL",  title: "Bar touched previous-day low" });
+  if (flags.length === 0) return <span className="text-neutral-700">—</span>;
+  return (
+    <span className="flex gap-1 flex-wrap">
+      {flags.map((f) => (
+        <span
+          key={f.label}
+          title={f.title}
+          className="px-1 py-0.5 text-xs rounded bg-amber-950/60 text-amber-300 border border-amber-900/50"
+        >
+          {f.label}
+        </span>
+      ))}
+    </span>
+  );
 }
 
 function FRBadge({ rate, bias }: { rate: number; bias?: FRBias }) {

@@ -67,6 +67,7 @@ export async function fetchKlines(
     close: parseFloat(r[4] as string),
     volume: parseFloat(r[5] as string),
     closeTime: r[6] as number,
+    takerBuyVolume: parseFloat(r[9] as string),
   }));
 
   // IMPORTANT: drop the last bar if it's still in progress (closeTime > now).

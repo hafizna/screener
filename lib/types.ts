@@ -11,6 +11,9 @@ export type ZLevel = 1 | 2 | 3; // 1 = normal, 2 = large, 3 = extreme
 // Positive FR = longs pay shorts; negative FR = shorts pay longs.
 export type FRBias = "favorable" | "neutral" | "unfavorable";
 
+// Whether the trigger bar's taker buy pressure aligns with the signal direction.
+export type DeltaBias = "aligned" | "neutral" | "opposed";
+
 export interface Kline {
   openTime: number;   // ms
   open: number;
@@ -19,6 +22,7 @@ export interface Kline {
   close: number;
   volume: number;
   closeTime: number;
+  takerBuyVolume: number; // aggressive buy volume; takerSell = volume - takerBuyVolume
 }
 
 // Computed market profile for one "session" window.
@@ -64,6 +68,9 @@ export interface Signal {
   // Funding rate at signal time (decimal: 0.0001 = +0.01% per 8h)
   fundingRate?: number;
   frBias?: FRBias;
+  // Taker buy ratio of trigger bar (0–1). >0.55 = buy-dominated, <0.45 = sell-dominated.
+  takerBuyRatio?: number;
+  deltaBias?: DeltaBias;
 }
 
 export interface ScanResult {
