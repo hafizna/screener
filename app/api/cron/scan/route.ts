@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchFundingRates, fetchKlines, fetchTopSymbolsByVolume, withConcurrency } from "@/lib/binance";
+import { fetchFundingRates, fetchKlines, fetchOIHistory, fetchTopSymbolsByVolume, withConcurrency } from "@/lib/binance";
 import type { FRBias } from "@/lib/types";
 import { analyzeBias } from "@/lib/bias";
 import { detectSignal } from "@/lib/signals";
@@ -58,9 +58,10 @@ export async function GET(req: NextRequest) {
     const signal = detectSignal(symbol, "15m", entryKlines);
     if (!signal) return null;
 
-    const [oneHourKlines, fourHourKlines] = await Promise.all([
+    const [oneHourKlines, fourHourKlines, oiHistory] = await Promise.all([
       fetchKlines(symbol, "1h"),
       fetchKlines(symbol, "4h"),
+      fetchOIHistory(symbol).catch(() => null), // non-fatal
     ]);
 
     const bias1h = analyzeBias(oneHourKlines);
@@ -68,6 +69,18 @@ export async function GET(req: NextRequest) {
     if (!passesBiasConfirmation(signal, bias1h, bias4h)) return null;
 
     const frInfo = fundingRates.get(symbol);
+
+    let oiChangePct: number | undefined;
+    let oiBias: "rising" | "flat" | "falling" | undefined;
+    if (oiHistory && oiHistory.length >= 2) {
+      const oldest = oiHistory[0].openInterest;
+      const latest = oiHistory[oiHistory.length - 1].openInterest;
+      if (oldest > 0) {
+        oiChangePct = ((latest - oldest) / oldest) * 100;
+        oiBias = oiChangePct > 0.5 ? "rising" : oiChangePct < -0.5 ? "falling" : "flat";
+      }
+    }
+
     return {
       ...signal,
       bias1h: bias1h.bias,
@@ -77,6 +90,7 @@ export async function GET(req: NextRequest) {
       ...(frInfo !== undefined
         ? { fundingRate: frInfo.lastFundingRate, frBias: classifyFR(signal.side, frInfo.lastFundingRate) }
         : {}),
+      ...(oiChangePct !== undefined ? { oiChangePct, oiBias } : {}),
     };
   });
 
@@ -91,14 +105,13 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // 4. Rank: HTF agreement + FR + delta alignment, then higher Z.
+  // 4. Rank: HTF agreement + FR + delta + OI alignment, then higher Z.
   signals.sort((a, b) => {
-    const frWeight = (sig: Signal) =>
-      sig.frBias === "favorable" ? 1 : sig.frBias === "unfavorable" ? -1 : 0;
-    const deltaWeight = (sig: Signal) =>
-      sig.deltaBias === "aligned" ? 1 : sig.deltaBias === "opposed" ? -1 : 0;
-    const scoreA = (a.biasScore4h ?? 0) + (a.biasScore1h ?? 0) + frWeight(a) + deltaWeight(a);
-    const scoreB = (b.biasScore4h ?? 0) + (b.biasScore1h ?? 0) + frWeight(b) + deltaWeight(b);
+    const frWeight    = (sig: Signal) => sig.frBias    === "favorable" ? 1 : sig.frBias    === "unfavorable" ? -1 : 0;
+    const deltaWeight = (sig: Signal) => sig.deltaBias === "aligned"   ? 1 : sig.deltaBias === "opposed"     ? -1 : 0;
+    const oiWeight    = (sig: Signal) => sig.oiBias    === "rising"    ? 1 : sig.oiBias    === "falling"     ? -1 : 0;
+    const scoreA = (a.biasScore4h ?? 0) + (a.biasScore1h ?? 0) + frWeight(a) + deltaWeight(a) + oiWeight(a);
+    const scoreB = (b.biasScore4h ?? 0) + (b.biasScore1h ?? 0) + frWeight(b) + deltaWeight(b) + oiWeight(b);
     if (scoreB !== scoreA) return scoreB - scoreA;
     if (b.zLevel !== a.zLevel) return b.zLevel - a.zLevel;
     return Math.abs(b.zScore) - Math.abs(a.zScore);

@@ -71,6 +71,10 @@ export interface Signal {
   // Taker buy ratio of trigger bar (0–1). >0.55 = buy-dominated, <0.45 = sell-dominated.
   takerBuyRatio?: number;
   deltaBias?: DeltaBias;
+  // Open interest % change over the last 4 × 15m periods at signal time.
+  // Rising OI = new money entering the market (confirms either direction).
+  oiChangePct?: number;
+  oiBias?: "rising" | "flat" | "falling";
 }
 
 export interface ScanResult {

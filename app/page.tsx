@@ -204,6 +204,7 @@ function SignalTable({ signals }: { signals: Signal[] }) {
             <th className="px-3 py-2 font-normal">Z</th>
             <th className="px-3 py-2 font-normal" title="Last settled funding rate. Positive = longs pay; negative = shorts pay.">FR</th>
             <th className="px-3 py-2 font-normal text-right" title="Fraction of trigger bar volume that were taker buy orders.">Buy%</th>
+            <th className="px-3 py-2 font-normal text-right" title="Open interest % change over the last 4 × 15m periods. Rising OI = new money entering.">OI Δ</th>
             <th className="px-3 py-2 font-normal">Conf</th>
             <th className="px-3 py-2 font-normal">Trigger</th>
             <th
@@ -259,6 +260,13 @@ function SignalTable({ signals }: { signals: Signal[] }) {
               <td className="px-3 py-2 text-right">
                 {s.takerBuyRatio !== undefined ? (
                   <DeltaBadge ratio={s.takerBuyRatio} bias={s.deltaBias} side={s.side} />
+                ) : (
+                  <span className="text-neutral-600">—</span>
+                )}
+              </td>
+              <td className="px-3 py-2 text-right">
+                {s.oiChangePct !== undefined ? (
+                  <OIBadge changePct={s.oiChangePct} bias={s.oiBias} />
                 ) : (
                   <span className="text-neutral-600">—</span>
                 )}
@@ -340,6 +348,21 @@ function DeltaBadge({ ratio, bias, side }: { ratio: number; bias?: DeltaBias; si
   return (
     <span className={`tabular-nums text-xs ${styles}`} title={`Taker buy ratio: ${pct}% of bar volume were aggressive buys`}>
       {pct}%
+    </span>
+  );
+}
+
+function OIBadge({ changePct, bias }: { changePct: number; bias?: "rising" | "flat" | "falling" }) {
+  const arrow = bias === "rising" ? "↑" : bias === "falling" ? "↓" : "→";
+  const styles =
+    bias === "rising"  ? "text-emerald-400" :
+    bias === "falling" ? "text-red-400"     : "text-neutral-400";
+  return (
+    <span
+      className={`tabular-nums text-xs ${styles}`}
+      title={`OI changed ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}% over last 4 × 15m periods`}
+    >
+      {arrow}{Math.abs(changePct).toFixed(2)}%
     </span>
   );
 }
