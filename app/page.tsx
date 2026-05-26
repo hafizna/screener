@@ -83,7 +83,7 @@ export default function DashboardPage() {
   }, [activeSignals, tfFilter, sideFilter, minZ, frFilter, minScore]);
 
   return (
-    <main className="min-h-screen bg-neutral-950 text-neutral-100 p-6">
+    <main className="min-h-screen bg-neutral-950 text-neutral-100 px-3 py-4 sm:px-6 sm:py-6">
       <header className="mb-6 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-medium">MP + Z screener</h1>
@@ -214,7 +214,8 @@ function SignalTable({ signals }: { signals: Signal[] }) {
   }
   return (
     <div className="rounded-md border border-neutral-800 overflow-hidden">
-      <table className="w-full text-sm">
+      <div className="overflow-x-auto">
+      <table className="w-full text-sm min-w-[1080px]">
         <thead className="bg-neutral-900 text-neutral-400 text-left">
           <tr>
             <th className="px-3 py-2 font-normal" title="Confluence score: HTF4H + HTF1H + FR + Delta + OI, each ±1. Max +5.">Score</th>
@@ -333,6 +334,7 @@ function SignalTable({ signals }: { signals: Signal[] }) {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
