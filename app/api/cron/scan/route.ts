@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchKlines, fetchTopSymbolsByVolume, withConcurrency } from "@/lib/binance";
+import { fetchFundingRates, fetchKlines, fetchTopSymbolsByVolume, withConcurrency } from "@/lib/binance";
+import type { FRBias } from "@/lib/types";
 import { analyzeBias } from "@/lib/bias";
 import { detectSignal } from "@/lib/signals";
 import { storeScanResult } from "@/lib/kv";
@@ -43,7 +44,14 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // 2. Fan out with bounded concurrency. Entry is 15m only; 1H/4H
+  // 2. Fetch funding rates for all symbols in one call before the main loop.
+  //    Weight: 10. Non-fatal — scan continues without FR data if this fails.
+  const fundingRates = await fetchFundingRates().catch((e: Error) => {
+    console.warn("FR fetch failed, proceeding without FR data:", e.message);
+    return new Map<string, { lastFundingRate: number }>();
+  });
+
+  // 3. Fan out with bounded concurrency. Entry is 15m only; 1H/4H
   // are fetched only after a raw trigger exists, so the scan stays light.
   const results = await withConcurrency(symbols, CONCURRENCY, async (symbol) => {
     const entryKlines = await fetchKlines(symbol, "15m");
@@ -59,12 +67,16 @@ export async function GET(req: NextRequest) {
     const bias4h = analyzeBias(fourHourKlines);
     if (!passesBiasConfirmation(signal, bias1h, bias4h)) return null;
 
+    const frInfo = fundingRates.get(symbol);
     return {
       ...signal,
       bias1h: bias1h.bias,
       bias4h: bias4h.bias,
       biasScore1h: bias1h.score,
       biasScore4h: bias4h.score,
+      ...(frInfo !== undefined
+        ? { fundingRate: frInfo.lastFundingRate, frBias: classifyFR(signal.side, frInfo.lastFundingRate) }
+        : {}),
     };
   });
 
@@ -79,11 +91,13 @@ export async function GET(req: NextRequest) {
     }
   }
 
-  // 4. Rank: stronger HTF agreement first, then higher Z.
+  // 4. Rank: HTF agreement + FR alignment first, then higher Z.
   signals.sort((a, b) => {
-    const biasA = (a.biasScore4h ?? 0) + (a.biasScore1h ?? 0);
-    const biasB = (b.biasScore4h ?? 0) + (b.biasScore1h ?? 0);
-    if (biasB !== biasA) return biasB - biasA;
+    const frWeight = (sig: Signal) =>
+      sig.frBias === "favorable" ? 1 : sig.frBias === "unfavorable" ? -1 : 0;
+    const scoreA = (a.biasScore4h ?? 0) + (a.biasScore1h ?? 0) + frWeight(a);
+    const scoreB = (b.biasScore4h ?? 0) + (b.biasScore1h ?? 0) + frWeight(b);
+    if (scoreB !== scoreA) return scoreB - scoreA;
     if (b.zLevel !== a.zLevel) return b.zLevel - a.zLevel;
     return Math.abs(b.zScore) - Math.abs(a.zScore);
   });
@@ -115,6 +129,22 @@ export async function GET(req: NextRequest) {
     signalsFound: scanResult.signals.length,
     errors: scanResult.symbolsErrored.length,
   });
+}
+
+// Positive FR = longs pay shorts; negative = shorts pay longs.
+// Favorable for longs: negative FR (shorts crowded, squeeze potential).
+// Favorable for shorts: FR ≥ +0.05% per 8h (longs overextended, paid to be short).
+// Unfavorable: FR is clearly working against the signal side.
+function classifyFR(side: "long" | "short", fr: number): FRBias {
+  if (side === "long") {
+    if (fr < 0) return "favorable";
+    if (fr > 0.001) return "unfavorable"; // > +0.10% per 8h — longs very crowded
+    return "neutral";
+  } else {
+    if (fr > 0.0005) return "favorable";  // > +0.05% per 8h — longs paying
+    if (fr < 0) return "unfavorable";
+    return "neutral";
+  }
 }
 
 type Bias = ReturnType<typeof analyzeBias>;

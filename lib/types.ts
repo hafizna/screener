@@ -7,6 +7,10 @@ export type BiasSide = SignalSide | "neutral";
 
 export type ZLevel = 1 | 2 | 3; // 1 = normal, 2 = large, 3 = extreme
 
+// Funding rate bias relative to the signal side.
+// Positive FR = longs pay shorts; negative FR = shorts pay longs.
+export type FRBias = "favorable" | "neutral" | "unfavorable";
+
 export interface Kline {
   openTime: number;   // ms
   open: number;
@@ -57,6 +61,9 @@ export interface Signal {
   nearPdl: boolean;
   // For the table — pretty distances etc., precomputed server-side
   distanceFromLevel: number; // ticks
+  // Funding rate at signal time (decimal: 0.0001 = +0.01% per 8h)
+  fundingRate?: number;
+  frBias?: FRBias;
 }
 
 export interface ScanResult {

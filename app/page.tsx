@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { ScanResult, Signal, Timeframe } from "@/lib/types";
+import type { FRBias, ScanResult, Signal, Timeframe } from "@/lib/types";
 
 type ApiResponse = (ScanResult & { stale: boolean; ageMs: number }) | {
   scannedAt: null;
@@ -26,6 +26,7 @@ export default function DashboardPage() {
   const [tfFilter, setTfFilter] = useState<Set<Timeframe>>(new Set(["15m"]));
   const [sideFilter, setSideFilter] = useState<"all" | "long" | "short">("all");
   const [minZ, setMinZ] = useState<2 | 3>(2);
+  const [frFilter, setFrFilter] = useState<"all" | "favorable">("all");
 
   async function refresh() {
     setLoading(true);
@@ -63,9 +64,10 @@ export default function DashboardPage() {
       if (!tfFilter.has(s.timeframe)) return false;
       if (sideFilter !== "all" && s.side !== sideFilter) return false;
       if (s.zLevel < minZ) return false;
+      if (frFilter === "favorable" && s.frBias !== "favorable") return false;
       return true;
     });
-  }, [activeSignals, tfFilter, sideFilter, minZ]);
+  }, [activeSignals, tfFilter, sideFilter, minZ, frFilter]);
 
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100 p-6">
@@ -136,6 +138,10 @@ export default function DashboardPage() {
           <Chip active={minZ === 2} onClick={() => setMinZ(2)}>≥ Large</Chip>
           <Chip active={minZ === 3} onClick={() => setMinZ(3)}>Extreme only</Chip>
         </FilterGroup>
+        <FilterGroup label="Fund rate">
+          <Chip active={frFilter === "all"} onClick={() => setFrFilter("all")}>All</Chip>
+          <Chip active={frFilter === "favorable"} onClick={() => setFrFilter("favorable")}>Favorable</Chip>
+        </FilterGroup>
         <div className="ml-auto text-sm text-neutral-400">
           {filtered.length} signal{filtered.length === 1 ? "" : "s"}
         </div>
@@ -196,6 +202,7 @@ function SignalTable({ signals }: { signals: Signal[] }) {
             <th className="px-3 py-2 font-normal">Side</th>
             <th className="px-3 py-2 font-normal">HTF bias</th>
             <th className="px-3 py-2 font-normal">Z</th>
+            <th className="px-3 py-2 font-normal" title="Last settled funding rate. Positive = longs pay; negative = shorts pay.">FR</th>
             <th className="px-3 py-2 font-normal">Trigger</th>
             <th
               className="px-3 py-2 font-normal text-right"
@@ -239,6 +246,13 @@ function SignalTable({ signals }: { signals: Signal[] }) {
               </td>
               <td className="px-3 py-2">
                 <ZBadge level={s.zLevel} z={s.zScore} />
+              </td>
+              <td className="px-3 py-2">
+                {s.fundingRate !== undefined ? (
+                  <FRBadge rate={s.fundingRate} bias={s.frBias} />
+                ) : (
+                  <span className="text-neutral-600">—</span>
+                )}
               </td>
               <td className="px-3 py-2 text-neutral-300">{s.triggerLevel}</td>
               <td className="px-3 py-2 text-right tabular-nums text-neutral-400">
@@ -300,6 +314,22 @@ function signalExpiresAt(signal: Signal): number {
 function formatBias(signal: Signal): string {
   if (!signal.bias4h || !signal.bias1h) return "-";
   return `4H ${signal.bias4h} / 1H ${signal.bias1h}`;
+}
+
+function FRBadge({ rate, bias }: { rate: number; bias?: FRBias }) {
+  const pct = (rate * 100).toFixed(4);
+  const signed = rate >= 0 ? `+${pct}%` : `${pct}%`;
+  const styles =
+    bias === "favorable"
+      ? "text-emerald-400"
+      : bias === "unfavorable"
+      ? "text-red-400"
+      : "text-neutral-400";
+  return (
+    <span className={`tabular-nums text-xs ${styles}`} title={`FR ${signed} per 8h`}>
+      {signed}
+    </span>
+  );
 }
 
 function ZBadge({ level, z }: { level: 1 | 2 | 3; z: number }) {

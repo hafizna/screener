@@ -110,6 +110,43 @@ export async function fetchTopSymbolsByVolume(
   return usdtPairs.slice(0, limit).map((d) => d.symbol);
 }
 
+export interface FundingRateInfo {
+  lastFundingRate: number; // decimal, e.g. 0.0001 = +0.01% per 8h; positive = longs pay
+  markPrice: number;
+  nextFundingTime: number;
+}
+
+// Single call (weight 10) that returns current funding rate + mark price for every
+// USDT-M perpetual. Much cheaper than per-symbol calls.
+export async function fetchFundingRates(signal?: AbortSignal): Promise<Map<string, FundingRateInfo>> {
+  const url = `${FAPI_BASE}/fapi/v1/premiumIndex`;
+  let res: Response;
+  try {
+    res = await fetch(url, { signal, cache: "no-store" });
+  } catch (e) {
+    throw new Error(`Network error fetching premiumIndex: ${(e as Error).message}`);
+  }
+  if (!res.ok) throw new Error(`premiumIndex failed: ${res.status}`);
+  const data = (await res.json()) as Array<{
+    symbol: string;
+    markPrice: string;
+    lastFundingRate: string;
+    nextFundingTime: number;
+  }>;
+  const map = new Map<string, FundingRateInfo>();
+  for (const d of data) {
+    if (!d.symbol.endsWith("USDT")) continue;
+    const fr = parseFloat(d.lastFundingRate);
+    if (!isFinite(fr)) continue;
+    map.set(d.symbol, {
+      lastFundingRate: fr,
+      markPrice: parseFloat(d.markPrice),
+      nextFundingTime: d.nextFundingTime,
+    });
+  }
+  return map;
+}
+
 // Run a list of async tasks with bounded concurrency. Critical for staying
 // under Binance's burst limit and Vercel's function timeout.
 //
