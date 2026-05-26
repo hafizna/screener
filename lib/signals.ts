@@ -1,4 +1,4 @@
-import type { Kline, MarketProfile, Signal, Timeframe } from "./types";
+import type { DeltaBias, Kline, MarketProfile, Signal, Timeframe } from "./types";
 import { buildCurrentAndPreviousDayProfiles } from "./profile";
 import { zScoreLastBar } from "./zscore";
 
@@ -177,6 +177,17 @@ export function detectSignal(
   const nearPdh = pdhl !== null && Math.abs(lastBar.high - pdhl.high) <= tolerancePrice * 2;
   const nearPdl = pdhl !== null && Math.abs(lastBar.low - pdhl.low) <= tolerancePrice * 2;
 
+  // 4. Taker buy ratio — fraction of volume that was aggressive buy orders.
+  //    >0.55 = buy-dominated bar, <0.45 = sell-dominated bar.
+  const takerBuyRatio =
+    lastBar.volume > 0 ? lastBar.takerBuyVolume / lastBar.volume : 0.5;
+  const deltaBias: DeltaBias =
+    takerBuyRatio > 0.55
+      ? side === "long" ? "aligned" : "opposed"
+      : takerBuyRatio < 0.45
+      ? side === "short" ? "aligned" : "opposed"
+      : "neutral";
+
   return {
     symbol,
     timeframe,
@@ -194,5 +205,7 @@ export function detectSignal(
     nearPdh,
     nearPdl,
     distanceFromLevel: match.distanceTicks / tickSize,
+    takerBuyRatio,
+    deltaBias,
   };
 }
