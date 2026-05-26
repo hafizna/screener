@@ -180,8 +180,18 @@ function SignalTable({ signals }: { signals: Signal[] }) {
             <th className="px-3 py-2 font-normal">Side</th>
             <th className="px-3 py-2 font-normal">Z</th>
             <th className="px-3 py-2 font-normal">Trigger</th>
-            <th className="px-3 py-2 font-normal text-right">Level</th>
-            <th className="px-3 py-2 font-normal text-right">Close</th>
+            <th
+              className="px-3 py-2 font-normal text-right"
+              title="Market Profile level touched by the trigger candle wick"
+            >
+              Level touched
+            </th>
+            <th
+              className="px-3 py-2 font-normal text-right"
+              title="Close price of the trigger candle"
+            >
+              Bar close
+            </th>
             <th className="px-3 py-2 font-normal">Confluence</th>
             <th className="px-3 py-2 font-normal">Time</th>
             <th className="px-3 py-2 font-normal"></th>
@@ -218,12 +228,22 @@ function SignalTable({ signals }: { signals: Signal[] }) {
               </td>
               <td className="px-3 py-2">
                 <a
-                  href={`https://www.tradingview.com/chart/?symbol=BINANCE:${s.symbol}.P&interval=${s.timeframe}`}
+                  href={tradingViewUrl(s)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-xs text-blue-400 hover:text-blue-300"
+                  title="Open Binance perpetual chart on TradingView"
                 >
                   TV →
+                </a>
+                <a
+                  href={binanceFuturesUrl(s.symbol)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="ml-3 text-xs text-amber-400 hover:text-amber-300"
+                  title="Open Binance Futures chart"
+                >
+                  BN
                 </a>
               </td>
             </tr>
@@ -232,6 +252,15 @@ function SignalTable({ signals }: { signals: Signal[] }) {
       </table>
     </div>
   );
+}
+
+function tradingViewUrl(s: Signal): string {
+  const interval = s.timeframe === "1h" ? "60" : s.timeframe.replace("m", "");
+  return `https://www.tradingview.com/chart/?symbol=BINANCE:${s.symbol}.P&interval=${interval}`;
+}
+
+function binanceFuturesUrl(symbol: string): string {
+  return `https://www.binance.com/en/futures/${symbol}`;
 }
 
 function ZBadge({ level, z }: { level: 1 | 2 | 3; z: number }) {
