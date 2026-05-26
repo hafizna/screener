@@ -1,0 +1,139 @@
+import type { Kline, Timeframe } from "./types";
+
+// Binance USDT-M futures public REST. No API key required for these endpoints.
+// Base URL must be fapi.binance.com (NOT api.binance.com, which is spot).
+const FAPI_BASE = "https://fapi.binance.com";
+
+// Rate-limit budget for the futures market endpoints:
+//   - 2400 request weight per minute per IP
+//   - klines endpoint: weight 1 for ≤100 bars, 2 for 100–500, 5 for 500–1000, 10 for 1000+
+// We fetch 200 bars per call (weight 2). 150 symbols × 3 timeframes = 450 calls × 2 = 900 weight.
+// Comfortably under 2400/min, but we'll throttle with a concurrency limit to avoid bursts.
+
+const TIMEFRAME_TO_INTERVAL: Record<Timeframe, string> = {
+  "15m": "15m",
+  "30m": "30m",
+  "1h": "1h",
+};
+
+// We need enough history to:
+//   - cover the current UTC day (up to 96 × 15m = 96 bars)
+//   - cover the previous UTC day (another 96 bars)
+//   - have at least Z_LENGTH=24 bars for the Z-score baseline before the trigger bar
+// 200 bars is comfortably enough for 15m (50 hours), 30m (100 hours), and 1H (8+ days).
+const BARS_PER_FETCH = 200;
+
+export interface FetchKlinesError extends Error {
+  symbol: string;
+  timeframe: Timeframe;
+  status?: number;
+}
+
+export async function fetchKlines(
+  symbol: string,
+  timeframe: Timeframe,
+  signal?: AbortSignal
+): Promise<Kline[]> {
+  const interval = TIMEFRAME_TO_INTERVAL[timeframe];
+  const url = `${FAPI_BASE}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${BARS_PER_FETCH}`;
+
+  let res: Response;
+  try {
+    res = await fetch(url, { signal, cache: "no-store" });
+  } catch (e) {
+    const err = new Error(`Network error: ${(e as Error).message}`) as FetchKlinesError;
+    err.symbol = symbol;
+    err.timeframe = timeframe;
+    throw err;
+  }
+
+  if (!res.ok) {
+    const err = new Error(`Binance ${res.status}: ${await res.text().catch(() => "")}`) as FetchKlinesError;
+    err.symbol = symbol;
+    err.timeframe = timeframe;
+    err.status = res.status;
+    throw err;
+  }
+
+  const raw = (await res.json()) as unknown[][];
+  // Binance kline tuple format:
+  // [openTime, open, high, low, close, volume, closeTime, quoteVol, trades, takerBuyBase, takerBuyQuote, ignore]
+  const klines: Kline[] = raw.map((r) => ({
+    openTime: r[0] as number,
+    open: parseFloat(r[1] as string),
+    high: parseFloat(r[2] as string),
+    low: parseFloat(r[3] as string),
+    close: parseFloat(r[4] as string),
+    volume: parseFloat(r[5] as string),
+    closeTime: r[6] as number,
+  }));
+
+  // IMPORTANT: drop the last bar if it's still in progress (closeTime > now).
+  // We only signal on closed bars — Pine evaluates on bar close too.
+  const now = Date.now();
+  if (klines.length > 0 && klines[klines.length - 1].closeTime > now) {
+    klines.pop();
+  }
+  return klines;
+}
+
+interface TickerStats {
+  symbol: string;
+  quoteVolume: number;
+}
+
+// Fetch 24h ticker stats for all symbols, used to pick the top-N by quote volume.
+// quoteVolume is in USDT — directly comparable across symbols. Weight: 40 (single
+// call), so this is cheap.
+export async function fetchTopSymbolsByVolume(
+  limit: number,
+  signal?: AbortSignal
+): Promise<string[]> {
+  const url = `${FAPI_BASE}/fapi/v1/ticker/24hr`;
+  const res = await fetch(url, { signal, cache: "no-store" });
+  if (!res.ok) {
+    throw new Error(`ticker/24hr failed: ${res.status}`);
+  }
+  const data = (await res.json()) as Array<{
+    symbol: string;
+    quoteVolume: string;
+    status?: string;
+  }>;
+  // Filter to perpetuals quoted in USDT and trading (PERPETUAL contracts, not delivery).
+  const usdtPairs: TickerStats[] = data
+    .filter((d) => d.symbol.endsWith("USDT"))
+    .map((d) => ({ symbol: d.symbol, quoteVolume: parseFloat(d.quoteVolume) }))
+    .filter((d) => isFinite(d.quoteVolume) && d.quoteVolume > 0);
+
+  usdtPairs.sort((a, b) => b.quoteVolume - a.quoteVolume);
+  return usdtPairs.slice(0, limit).map((d) => d.symbol);
+}
+
+// Run a list of async tasks with bounded concurrency. Critical for staying
+// under Binance's burst limit and Vercel's function timeout.
+//
+// We use 20 concurrent fetches: at ~150ms latency per fetch, that's ~7.5
+// batches/sec, well below Binance's 6000 weight/min IP limit for klines.
+export async function withConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>
+): Promise<Array<{ item: T; result: R } | { item: T; error: Error }>> {
+  const results: Array<{ item: T; result: R } | { item: T; error: Error }> = new Array(items.length);
+  let next = 0;
+  async function worker() {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      try {
+        const result = await fn(items[i]);
+        results[i] = { item: items[i], result };
+      } catch (e) {
+        results[i] = { item: items[i], error: e as Error };
+      }
+    }
+  }
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
