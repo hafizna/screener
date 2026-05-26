@@ -207,7 +207,12 @@ function SignalTable({ signals }: { signals: Signal[] }) {
             >
               Bar close
             </th>
-            <th className="px-3 py-2 font-normal">Confluence</th>
+            <th
+              className="px-3 py-2 font-normal text-right"
+              title="How long the signal remains actionable before the next candle closes"
+            >
+              Valid for
+            </th>
             <th className="px-3 py-2 font-normal">Time</th>
             <th className="px-3 py-2 font-normal"></th>
           </tr>
@@ -235,8 +240,8 @@ function SignalTable({ signals }: { signals: Signal[] }) {
                 {formatPrice(s.triggerPrice)}
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{formatPrice(s.barClose)}</td>
-              <td className="px-3 py-2 text-xs text-neutral-400">
-                {confluenceBadges(s)}
+              <td className="px-3 py-2 text-right text-xs tabular-nums text-amber-300">
+                {formatRemaining(signalExpiresAt(s) - Date.now())}
               </td>
               <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums">
                 {new Date(s.barTime).toISOString().slice(5, 16).replace("T", " ")}
@@ -301,17 +306,17 @@ function ZBadge({ level, z }: { level: 1 | 2 | 3; z: number }) {
   );
 }
 
-function confluenceBadges(s: Signal) {
-  const tags: string[] = [];
-  if (s.nearVwap) tags.push("VWAP");
-  if (s.nearPdh) tags.push("PDH");
-  if (s.nearPdl) tags.push("PDL");
-  return tags.length === 0 ? <span className="text-neutral-700">—</span> : tags.join(" · ");
-}
-
 function formatPrice(n: number): string {
   if (n >= 1000) return n.toFixed(2);
   if (n >= 1) return n.toFixed(4);
   if (n >= 0.01) return n.toFixed(5);
   return n.toFixed(7);
+}
+
+function formatRemaining(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
 }

@@ -23,7 +23,7 @@ This mirrors the `long_signal` / `short_signal` lines of `market_profile_tpo_v6_
 - **Trigger**: the market-profile level touched by the trigger candle wick. `PREV_` means the level comes from the previous UTC day.
 - **Level touched**: the exact price of that trigger level.
 - **Bar close**: the close price of the trigger candle. For a long, the candle should reject upward from the touched level; for a short, it should reject downward.
-- **Confluence**: optional extra context such as VWAP, previous-day high, or previous-day low.
+- **Valid for**: countdown until the signal expires. After expiry, it is hidden from the dashboard on the next refresh.
 
 Signals are only treated as actionable for one candle after the trigger candle closes. The dashboard keeps the latest scan in storage, but hides expired signals automatically on refresh so old setups do not look fresh.
 
