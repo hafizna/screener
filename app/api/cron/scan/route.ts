@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { fetchKlines, fetchTopSymbolsByVolume, withConcurrency } from "@/lib/binance";
+import { analyzeBias } from "@/lib/bias";
 import { detectSignal } from "@/lib/signals";
 import { storeScanResult } from "@/lib/kv";
-import type { Signal, Timeframe, ScanResult } from "@/lib/types";
+import type { Signal, ScanResult } from "@/lib/types";
 
 // Vercel function config — needs the extended timeout that comes with Pro plan
 // (or with fluid compute on Hobby — set to 60s and it works on either).
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
-const TIMEFRAMES: Timeframe[] = ["15m", "30m", "1h"];
 const SYMBOL_LIMIT = parseInt(process.env.SYMBOL_LIMIT ?? "150", 10);
 const CONCURRENCY = parseInt(process.env.FETCH_CONCURRENCY ?? "20", 10);
 
@@ -43,38 +43,48 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // 2. Build the (symbol, timeframe) task list
-  type Task = { symbol: string; timeframe: Timeframe };
-  const tasks: Task[] = [];
-  for (const symbol of symbols) {
-    for (const timeframe of TIMEFRAMES) {
-      tasks.push({ symbol, timeframe });
-    }
-  }
+  // 2. Fan out with bounded concurrency. Entry is 15m only; 1H/4H
+  // are fetched only after a raw trigger exists, so the scan stays light.
+  const results = await withConcurrency(symbols, CONCURRENCY, async (symbol) => {
+    const entryKlines = await fetchKlines(symbol, "15m");
+    const signal = detectSignal(symbol, "15m", entryKlines);
+    if (!signal) return null;
 
-  // 3. Fan out with bounded concurrency. Each task: fetch + detect.
-  const results = await withConcurrency(tasks, CONCURRENCY, async (task) => {
-    const klines = await fetchKlines(task.symbol, task.timeframe);
-    return detectSignal(task.symbol, task.timeframe, klines);
+    const [oneHourKlines, fourHourKlines] = await Promise.all([
+      fetchKlines(symbol, "1h"),
+      fetchKlines(symbol, "4h"),
+    ]);
+
+    const bias1h = analyzeBias(oneHourKlines);
+    const bias4h = analyzeBias(fourHourKlines);
+    if (bias1h.bias !== signal.side || bias4h.bias !== signal.side) return null;
+
+    return {
+      ...signal,
+      bias1h: bias1h.bias,
+      bias4h: bias4h.bias,
+      biasScore1h: bias1h.score,
+      biasScore4h: bias4h.score,
+    };
   });
 
-  // 4. Collect signals and errors
+  // 3. Collect signals and errors
   const signals: Signal[] = [];
   const errored: string[] = [];
   for (const r of results) {
     if ("error" in r) {
-      errored.push(`${r.item.symbol}:${r.item.timeframe}`);
+      errored.push(r.item);
     } else if (r.result) {
       signals.push(r.result);
     }
   }
 
-  // 5. Rank: higher Z first, then more confluence flags
+  // 4. Rank: stronger HTF agreement first, then higher Z.
   signals.sort((a, b) => {
-    const confA = (a.nearVwap ? 1 : 0) + (a.nearPdh ? 1 : 0) + (a.nearPdl ? 1 : 0);
-    const confB = (b.nearVwap ? 1 : 0) + (b.nearPdh ? 1 : 0) + (b.nearPdl ? 1 : 0);
+    const biasA = (a.biasScore4h ?? 0) + (a.biasScore1h ?? 0);
+    const biasB = (b.biasScore4h ?? 0) + (b.biasScore1h ?? 0);
+    if (biasB !== biasA) return biasB - biasA;
     if (b.zLevel !== a.zLevel) return b.zLevel - a.zLevel;
-    if (confB !== confA) return confB - confA;
     return Math.abs(b.zScore) - Math.abs(a.zScore);
   });
 

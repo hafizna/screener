@@ -1,17 +1,18 @@
 # MP+Z screener
 
-Scans Binance USDT-M futures (top 150 by 24h volume) every 15 minutes for setups matching the market-profile + volume Z-score logic from your Pine indicator. Dashboard shows the latest signals; click through to TradingView to confirm before any trade.
+Scans Binance USDT-M futures (top 150 by 24h volume) every 15 minutes for 15m entry triggers that align with 1H and 4H rule-based bias. Dashboard shows the latest signals; click through to TradingView or Binance to confirm before any trade.
 
 ## What it detects
 
 A bar qualifies as a signal when **all** are true:
 
-1. The bar's volume is at least Large (Z ≥ 1.5) vs the trailing 24-bar window.
-2. The bar is directional: bullish bar (close > open) for a long, bearish for a short.
-3. The bar's wick comes within 2 profile-ticks of one of: current day's POC / VAL (long) or POC / VAH (short), OR the previous day's same levels.
-4. The bar closed in the direction of the rejection (i.e., bullish bar that wicked into VAL and closed back above it = long candidate).
+1. The 15m bar's volume is at least Large (Z ≥ 1.5) vs the trailing 24-bar window.
+2. The 15m bar is directional: bullish bar (close > open) for a long, bearish for a short.
+3. The 15m bar's wick comes within 2 profile-ticks of one of: current day's POC / VAL (long) or POC / VAH (short), OR the previous day's same levels.
+4. The 15m bar closed in the direction of the rejection (i.e., bullish bar that wicked into VAL and closed back above it = long candidate).
+5. The 1H and 4H bias both agree with the 15m signal side.
 
-Signals are then enriched with confluence flags: near day VWAP, near previous-day high/low. Ranking is by Z-level descending, then confluence count, then raw Z.
+The 1H/4H bias is rule-based: price location vs recent market-profile POC/VAH/VAL, close vs SMA20, and short momentum. Signals are ranked by stronger higher-timeframe agreement, then Z-level, then raw Z.
 
 This mirrors the `long_signal` / `short_signal` lines of `market_profile_tpo_v6_vwap_cloud_bands.pine` faithfully — same half-open TPO interval logic, same CBOT value-area builder, same Z thresholds.
 
@@ -19,6 +20,7 @@ This mirrors the `long_signal` / `short_signal` lines of `market_profile_tpo_v6_
 
 - **TF**: candle timeframe that produced the signal.
 - **Side**: long means a bullish rejection from support-like levels; short means a bearish rejection from resistance-like levels.
+- **HTF bias**: the 4H and 1H rule-based bias that confirmed the 15m trigger.
 - **Z**: volume abnormality on the trigger candle. `LG` is large volume, `EX` is extreme volume.
 - **Trigger**: the market-profile level touched by the trigger candle wick. `PREV_` means the level comes from the previous UTC day.
 - **Level touched**: the exact price of that trigger level.

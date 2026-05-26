@@ -1,8 +1,9 @@
 // Single source of truth for shapes used across the screener.
 
-export type Timeframe = "15m" | "30m" | "1h";
+export type Timeframe = "15m" | "30m" | "1h" | "4h";
 
 export type SignalSide = "long" | "short";
+export type BiasSide = SignalSide | "neutral";
 
 export type ZLevel = 1 | 2 | 3; // 1 = normal, 2 = large, 3 = extreme
 
@@ -39,6 +40,10 @@ export interface Signal {
   side: SignalSide;
   zLevel: ZLevel;
   zScore: number;       // raw z value for the trigger bar
+  bias4h?: BiasSide;
+  bias1h?: BiasSide;
+  biasScore4h?: number;
+  biasScore1h?: number;
   triggerLevel: "POC" | "VAH" | "VAL" | "PREV_POC" | "PREV_VAH" | "PREV_VAL";
   triggerPrice: number; // the MP level we touched
   barTime: number;      // openTime of trigger bar

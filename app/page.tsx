@@ -14,6 +14,7 @@ const TIMEFRAME_MS: Record<Timeframe, number> = {
   "15m": 15 * 60_000,
   "30m": 30 * 60_000,
   "1h": 60 * 60_000,
+  "4h": 4 * 60 * 60_000,
 };
 
 export default function DashboardPage() {
@@ -22,7 +23,7 @@ export default function DashboardPage() {
   const [err, setErr] = useState<string | null>(null);
 
   // Filters
-  const [tfFilter, setTfFilter] = useState<Set<Timeframe>>(new Set(["15m", "30m", "1h"]));
+  const [tfFilter, setTfFilter] = useState<Set<Timeframe>>(new Set(["15m"]));
   const [sideFilter, setSideFilter] = useState<"all" | "long" | "short">("all");
   const [minZ, setMinZ] = useState<2 | 3>(2);
 
@@ -109,7 +110,7 @@ export default function DashboardPage() {
 
       <section className="mb-4 flex flex-wrap gap-2 items-center">
         <FilterGroup label="Timeframe">
-          {(["15m", "30m", "1h"] as Timeframe[]).map((tf) => (
+          {(["15m"] as Timeframe[]).map((tf) => (
             <Chip
               key={tf}
               active={tfFilter.has(tf)}
@@ -193,6 +194,7 @@ function SignalTable({ signals }: { signals: Signal[] }) {
             <th className="px-3 py-2 font-normal">Symbol</th>
             <th className="px-3 py-2 font-normal">TF</th>
             <th className="px-3 py-2 font-normal">Side</th>
+            <th className="px-3 py-2 font-normal">HTF bias</th>
             <th className="px-3 py-2 font-normal">Z</th>
             <th className="px-3 py-2 font-normal">Trigger</th>
             <th
@@ -231,6 +233,9 @@ function SignalTable({ signals }: { signals: Signal[] }) {
                 }`}
               >
                 {s.side}
+              </td>
+              <td className="px-3 py-2 text-xs text-neutral-400">
+                {formatBias(s)}
               </td>
               <td className="px-3 py-2">
                 <ZBadge level={s.zLevel} z={s.zScore} />
@@ -275,7 +280,8 @@ function SignalTable({ signals }: { signals: Signal[] }) {
 }
 
 function tradingViewUrl(s: Signal): string {
-  const interval = s.timeframe === "1h" ? "60" : s.timeframe.replace("m", "");
+  const interval =
+    s.timeframe === "1h" ? "60" : s.timeframe === "4h" ? "240" : s.timeframe.replace("m", "");
   return `https://www.tradingview.com/chart/?symbol=BINANCE:${s.symbol}.P&interval=${interval}`;
 }
 
@@ -289,6 +295,11 @@ function isSignalActive(signal: Signal, now: number): boolean {
 
 function signalExpiresAt(signal: Signal): number {
   return signal.barTime + TIMEFRAME_MS[signal.timeframe] * 2;
+}
+
+function formatBias(signal: Signal): string {
+  if (!signal.bias4h || !signal.bias1h) return "-";
+  return `4H ${signal.bias4h} / 1H ${signal.bias1h}`;
 }
 
 function ZBadge({ level, z }: { level: 1 | 2 | 3; z: number }) {
