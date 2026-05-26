@@ -17,6 +17,17 @@ const TIMEFRAME_MS: Record<Timeframe, number> = {
   "4h": 4 * 60 * 60_000,
 };
 
+// Confluence score: each of the 5 factors contributes ±1.
+// Range: −5 (everything opposed) to +5 (everything aligned).
+function confluenceScore(s: Signal): number {
+  const htf4h = s.bias4h === s.side ? 1 : s.bias4h && s.bias4h !== "neutral" && s.bias4h !== s.side ? -1 : 0;
+  const htf1h = s.bias1h === s.side ? 1 : s.bias1h && s.bias1h !== "neutral" && s.bias1h !== s.side ? -1 : 0;
+  const fr    = s.frBias    === "favorable" ? 1 : s.frBias    === "unfavorable" ? -1 : 0;
+  const delta = s.deltaBias === "aligned"   ? 1 : s.deltaBias === "opposed"     ? -1 : 0;
+  const oi    = s.oiBias    === "rising"    ? 1 : s.oiBias    === "falling"     ? -1 : 0;
+  return htf4h + htf1h + fr + delta + oi;
+}
+
 export default function DashboardPage() {
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -27,6 +38,7 @@ export default function DashboardPage() {
   const [sideFilter, setSideFilter] = useState<"all" | "long" | "short">("all");
   const [minZ, setMinZ] = useState<2 | 3>(2);
   const [frFilter, setFrFilter] = useState<"all" | "favorable">("all");
+  const [minScore, setMinScore] = useState<number>(0);
 
   async function refresh() {
     setLoading(true);
@@ -65,9 +77,10 @@ export default function DashboardPage() {
       if (sideFilter !== "all" && s.side !== sideFilter) return false;
       if (s.zLevel < minZ) return false;
       if (frFilter === "favorable" && s.frBias !== "favorable") return false;
+      if (confluenceScore(s) < minScore) return false;
       return true;
     });
-  }, [activeSignals, tfFilter, sideFilter, minZ, frFilter]);
+  }, [activeSignals, tfFilter, sideFilter, minZ, frFilter, minScore]);
 
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100 p-6">
@@ -142,6 +155,13 @@ export default function DashboardPage() {
           <Chip active={frFilter === "all"} onClick={() => setFrFilter("all")}>All</Chip>
           <Chip active={frFilter === "favorable"} onClick={() => setFrFilter("favorable")}>Favorable</Chip>
         </FilterGroup>
+        <FilterGroup label="Min score">
+          {([0, 2, 3, 4] as const).map((n) => (
+            <Chip key={n} active={minScore === n} onClick={() => setMinScore(n)}>
+              {n === 0 ? "All" : `≥ ${n}`}
+            </Chip>
+          ))}
+        </FilterGroup>
         <div className="ml-auto text-sm text-neutral-400">
           {filtered.length} signal{filtered.length === 1 ? "" : "s"}
         </div>
@@ -197,6 +217,7 @@ function SignalTable({ signals }: { signals: Signal[] }) {
       <table className="w-full text-sm">
         <thead className="bg-neutral-900 text-neutral-400 text-left">
           <tr>
+            <th className="px-3 py-2 font-normal" title="Confluence score: HTF4H + HTF1H + FR + Delta + OI, each ±1. Max +5.">Score</th>
             <th className="px-3 py-2 font-normal">Symbol</th>
             <th className="px-3 py-2 font-normal">TF</th>
             <th className="px-3 py-2 font-normal">Side</th>
@@ -235,6 +256,9 @@ function SignalTable({ signals }: { signals: Signal[] }) {
               key={`${s.symbol}-${s.timeframe}-${s.barTime}-${i}`}
               className="border-t border-neutral-800 hover:bg-neutral-900/40"
             >
+              <td className="px-3 py-2">
+                <ScoreBadge score={confluenceScore(s)} />
+              </td>
               <td className="px-3 py-2 font-medium">{s.symbol}</td>
               <td className="px-3 py-2 text-neutral-400">{s.timeframe}</td>
               <td
@@ -348,6 +372,23 @@ function DeltaBadge({ ratio, bias, side }: { ratio: number; bias?: DeltaBias; si
   return (
     <span className={`tabular-nums text-xs ${styles}`} title={`Taker buy ratio: ${pct}% of bar volume were aggressive buys`}>
       {pct}%
+    </span>
+  );
+}
+
+function ScoreBadge({ score }: { score: number }) {
+  const styles =
+    score >= 4  ? "bg-emerald-500  text-white border-emerald-400" :
+    score >= 2  ? "bg-emerald-900  text-emerald-300 border-emerald-700" :
+    score >= 0  ? "bg-neutral-800  text-neutral-300 border-neutral-700" :
+                  "bg-red-950      text-red-400 border-red-900";
+  const sign = score > 0 ? "+" : "";
+  return (
+    <span
+      className={`inline-flex items-center justify-center w-8 h-6 rounded text-xs font-medium border tabular-nums ${styles}`}
+      title={`Confluence score ${sign}${score} / 5 (HTF4H + HTF1H + FR + Delta + OI)`}
+    >
+      {sign}{score}
     </span>
   );
 }
