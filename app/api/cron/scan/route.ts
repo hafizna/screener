@@ -57,7 +57,7 @@ export async function GET(req: NextRequest) {
 
     const bias1h = analyzeBias(oneHourKlines);
     const bias4h = analyzeBias(fourHourKlines);
-    if (bias1h.bias !== signal.side || bias4h.bias !== signal.side) return null;
+    if (!passesBiasConfirmation(signal, bias1h, bias4h)) return null;
 
     return {
       ...signal,
@@ -115,4 +115,13 @@ export async function GET(req: NextRequest) {
     signalsFound: scanResult.signals.length,
     errors: scanResult.symbolsErrored.length,
   });
+}
+
+type Bias = ReturnType<typeof analyzeBias>;
+
+function passesBiasConfirmation(signal: Signal, bias1h: Bias, bias4h: Bias): boolean {
+  const opposite = signal.side === "long" ? "short" : "long";
+  if (bias4h.bias === opposite || bias1h.bias === opposite) return false;
+  if (bias4h.bias === signal.side || bias1h.bias === signal.side) return true;
+  return Math.abs(bias4h.score) >= 3 && Math.abs(bias1h.score) <= 1;
 }

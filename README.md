@@ -10,7 +10,7 @@ A bar qualifies as a signal when **all** are true:
 2. The 15m bar is directional: bullish bar (close > open) for a long, bearish for a short.
 3. The 15m bar's wick comes within 2 profile-ticks of one of: current day's POC / VAL (long) or POC / VAH (short), OR the previous day's same levels.
 4. The 15m bar closed in the direction of the rejection (i.e., bullish bar that wicked into VAL and closed back above it = long candidate).
-5. The 1H and 4H bias both agree with the 15m signal side.
+5. The 1H/4H bias confirms the 15m signal. Opposite higher-timeframe bias blocks the signal; neutral bias is allowed when at least one higher timeframe agrees or the 4H score is strong.
 
 The 1H/4H bias is rule-based: price location vs recent market-profile POC/VAH/VAL, close vs SMA20, and short momentum. Signals are ranked by stronger higher-timeframe agreement, then Z-level, then raw Z.
 
