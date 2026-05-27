@@ -68,6 +68,25 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, []);
 
+  // When regime changes, nudge filters to match the playbook automatically.
+  // User can still override; this just saves them from manually switching every time.
+  const regime = data && "regime" in data ? (data.regime as MarketRegime | undefined) : undefined;
+  useEffect(() => {
+    if (!regime) return;
+    if (regime === "flush") {
+      setSideFilter("long");        // bounce = longs at support
+      setTypeFilter("bounce");
+      setMinScore((prev) => Math.max(prev, 2)); // at least some squeeze confirmation
+    } else if (regime === "breakout") {
+      setSideFilter("long");        // continuation = riding the breakout
+      setTypeFilter("continuation");
+      setMinScore((prev) => Math.max(prev, 0));
+    } else {
+      setTypeFilter("all");
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [regime]);
+
   const activeSignals = useMemo<Signal[]>(() => {
     if (!data || !("signals" in data) || data.signals.length === 0) return [];
     return data.signals.filter((s) => isSignalActive(s, Date.now()));
@@ -184,7 +203,12 @@ export default function DashboardPage() {
         </div>
       </section>
 
-      <SignalTable signals={filtered} />
+      <SignalTable
+        signals={filtered}
+        regime={
+          data && "regime" in data ? (data.regime as MarketRegime | undefined) : undefined
+        }
+      />
     </main>
   );
 }
@@ -221,7 +245,25 @@ function Chip({
   );
 }
 
-function SignalTable({ signals }: { signals: Signal[] }) {
+// Column visibility per regime:
+//   flush     → hide HTF bias (bypassed by design), highlight Sqz/FR/L/S
+//   breakout  → hide Sqz (not a squeeze play), highlight HTF bias
+//   neutral   → show everything, no highlights
+interface ColFlags {
+  showHTF: boolean;
+  showSqz: boolean;
+  hlHTF: boolean;   // highlight header
+  hlFR: boolean;
+  hlLS: boolean;
+  hlSqz: boolean;
+}
+function colFlags(regime?: MarketRegime): ColFlags {
+  if (regime === "flush")    return { showHTF: false, showSqz: true,  hlHTF: false, hlFR: true,  hlLS: true,  hlSqz: true  };
+  if (regime === "breakout") return { showHTF: true,  showSqz: false, hlHTF: true,  hlFR: false, hlLS: false, hlSqz: false };
+  return                            { showHTF: true,  showSqz: true,  hlHTF: false, hlFR: false, hlLS: false, hlSqz: false };
+}
+
+function SignalTable({ signals, regime }: { signals: Signal[]; regime?: MarketRegime }) {
   if (signals.length === 0) {
     return (
       <div className="rounded-md border border-neutral-800 bg-neutral-900/40 p-8 text-center text-neutral-500 text-sm">
@@ -229,52 +271,46 @@ function SignalTable({ signals }: { signals: Signal[] }) {
       </div>
     );
   }
+
+  const f = colFlags(regime);
+  // Header cell: dim when not highlighted (in a regime-specific view), normal otherwise.
+  const th = (label: string, extra?: string, highlight?: boolean) => (
+    <th
+      className={`px-3 py-2 font-normal ${highlight ? "text-neutral-100" : ""}`}
+      title={extra}
+    >
+      {label}
+    </th>
+  );
+
   return (
     <div className="rounded-md border border-neutral-800 overflow-hidden">
       <div className="overflow-x-auto">
-      <table className="w-full text-sm min-w-[1360px]">
+      <table className="w-full text-sm min-w-[1200px]">
         <thead className="bg-neutral-900 text-neutral-400 text-left">
           <tr>
-            <th className="px-3 py-2 font-normal" title="Confluence score: HTF4H + HTF1H + FR + Delta + OI + L/S + RS, each ±1. Max +7.">Score</th>
-            <th className="px-3 py-2 font-normal">Symbol</th>
-            <th className="px-3 py-2 font-normal" title="Signal type given current market regime.">Type</th>
-            <th className="px-3 py-2 font-normal">TF</th>
-            <th className="px-3 py-2 font-normal">Side</th>
-            <th className="px-3 py-2 font-normal">HTF bias</th>
-            <th className="px-3 py-2 font-normal">Z</th>
-            <th className="px-3 py-2 font-normal" title="Last settled funding rate. Positive = longs pay; negative = shorts pay.">FR</th>
+            {th("Score", "Confluence score: HTF4H + HTF1H + FR + Delta + OI + L/S + RS, each ±1.")}
+            {th("Symbol")}
+            {th("Type", "Signal type given current market regime.")}
+            {th("TF")}
+            {th("Side")}
+            {f.showHTF && th("HTF bias", undefined, f.hlHTF)}
+            {th("Z")}
+            {th("FR",   "Last settled funding rate. Positive = longs pay; negative = shorts pay.", f.hlFR)}
             <th className="px-3 py-2 font-normal text-right" title="Fraction of trigger bar volume that were taker buy orders.">Buy%</th>
-            <th className="px-3 py-2 font-normal text-right" title="Open interest % change over the last 4 × 15m periods. Rising OI = new money entering.">OI Δ</th>
-            <th className="px-3 py-2 font-normal text-right" title="Global long/short account ratio. <0.85 = crowded shorts, >1.20 = crowded longs.">L/S</th>
-            <th className="px-3 py-2 font-normal text-right" title="Relative strength vs BTC over last 4 × 4H bars. >1.1 = outperforming BTC.">RS</th>
-            <th className="px-3 py-2 font-normal text-center" title="Squeeze potential score (0–6): L/S positioning + FR magnitude + OI + RS divergence.">Sqz</th>
-            <th className="px-3 py-2 font-normal">Conf</th>
-            <th className="px-3 py-2 font-normal">Trigger</th>
-            <th
-              className="px-3 py-2 font-normal text-right"
-              title="Market Profile level touched by the trigger candle wick"
-            >
-              Level
-            </th>
-            <th
-              className="px-3 py-2 font-normal text-right"
-              title="Close price of the trigger candle"
-            >
-              Close
-            </th>
-            <th
-              className="px-3 py-2 font-normal text-right"
-              title="ATR-based targets: SL · TP1 (1.5×ATR) · TP2 (3×ATR)"
-            >
-              SL · TP1 · TP2
-            </th>
-            <th
-              className="px-3 py-2 font-normal text-right"
-              title="How long the signal remains actionable before the next candle closes"
-            >
-              Valid
-            </th>
-            <th className="px-3 py-2 font-normal">Time</th>
+            <th className="px-3 py-2 font-normal text-right" title="Open interest % change over last 4 × 15m periods.">OI Δ</th>
+            <th className={`px-3 py-2 font-normal text-right ${f.hlLS ? "text-neutral-100" : ""}`} title="Global long/short account ratio. <0.85 = crowded shorts, >1.20 = crowded longs.">L/S</th>
+            <th className="px-3 py-2 font-normal text-right" title="Relative strength vs BTC over last 4 × 4H bars.">RS</th>
+            {f.showSqz && (
+              <th className={`px-3 py-2 font-normal text-center ${f.hlSqz ? "text-neutral-100" : ""}`} title="Squeeze potential score (0–6): L/S + FR magnitude + OI + RS divergence.">Sqz</th>
+            )}
+            {th("Conf")}
+            {th("Trigger")}
+            <th className="px-3 py-2 font-normal text-right" title="Market Profile level touched by the trigger candle wick">Level</th>
+            <th className="px-3 py-2 font-normal text-right" title="Close price of the trigger candle">Close</th>
+            <th className="px-3 py-2 font-normal text-right" title="ATR-based targets: SL · TP1 (1.5×ATR) · TP2 (3×ATR)">SL · TP1 · TP2</th>
+            <th className="px-3 py-2 font-normal text-right" title="How long the signal remains actionable">Valid</th>
+            {th("Time")}
             <th className="px-3 py-2 font-normal"></th>
           </tr>
         </thead>
@@ -290,61 +326,47 @@ function SignalTable({ signals }: { signals: Signal[] }) {
               <td className="px-3 py-2 font-medium">{s.symbol}</td>
               <td className="px-3 py-2"><SignalTypeBadge type={s.signalType} /></td>
               <td className="px-3 py-2 text-neutral-400">{s.timeframe}</td>
-              <td
-                className={`px-3 py-2 ${
-                  s.side === "long" ? "text-emerald-400" : "text-pink-400"
-                }`}
-              >
+              <td className={`px-3 py-2 ${s.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>
                 {s.side}
               </td>
-              <td className="px-3 py-2 text-xs text-neutral-400">
-                {formatBias(s)}
-              </td>
+              {f.showHTF && (
+                <td className="px-3 py-2 text-xs text-neutral-400">{formatBias(s)}</td>
+              )}
               <td className="px-3 py-2">
                 <ZBadge level={s.zLevel} z={s.zScore} />
               </td>
               <td className="px-3 py-2">
-                {s.fundingRate !== undefined ? (
-                  <FRBadge rate={s.fundingRate} bias={s.frBias} />
-                ) : (
-                  <span className="text-neutral-600">—</span>
-                )}
+                {s.fundingRate !== undefined
+                  ? <FRBadge rate={s.fundingRate} bias={s.frBias} />
+                  : <span className="text-neutral-600">—</span>}
               </td>
               <td className="px-3 py-2 text-right">
-                {s.takerBuyRatio !== undefined ? (
-                  <DeltaBadge ratio={s.takerBuyRatio} bias={s.deltaBias} side={s.side} />
-                ) : (
-                  <span className="text-neutral-600">—</span>
-                )}
+                {s.takerBuyRatio !== undefined
+                  ? <DeltaBadge ratio={s.takerBuyRatio} bias={s.deltaBias} side={s.side} />
+                  : <span className="text-neutral-600">—</span>}
               </td>
               <td className="px-3 py-2 text-right">
-                {s.oiChangePct !== undefined ? (
-                  <OIBadge changePct={s.oiChangePct} bias={s.oiBias} />
-                ) : (
-                  <span className="text-neutral-600">—</span>
-                )}
+                {s.oiChangePct !== undefined
+                  ? <OIBadge changePct={s.oiChangePct} bias={s.oiBias} />
+                  : <span className="text-neutral-600">—</span>}
               </td>
               <td className="px-3 py-2 text-right">
-                {s.longShortRatio !== undefined ? (
-                  <LSBadge ratio={s.longShortRatio} bias={s.lsBias} />
-                ) : (
-                  <span className="text-neutral-600">—</span>
-                )}
+                {s.longShortRatio !== undefined
+                  ? <LSBadge ratio={s.longShortRatio} bias={s.lsBias} />
+                  : <span className="text-neutral-600">—</span>}
               </td>
               <td className="px-3 py-2 text-right">
-                {s.relativeStrength !== undefined ? (
-                  <RSBadge rs={s.relativeStrength} bias={s.rsBias} side={s.side} />
-                ) : (
-                  <span className="text-neutral-600">—</span>
-                )}
+                {s.relativeStrength !== undefined
+                  ? <RSBadge rs={s.relativeStrength} bias={s.rsBias} side={s.side} />
+                  : <span className="text-neutral-600">—</span>}
               </td>
-              <td className="px-3 py-2 text-center">
-                {s.squeezeScore !== undefined ? (
-                  <SqueezeBadge score={s.squeezeScore} />
-                ) : (
-                  <span className="text-neutral-600">—</span>
-                )}
-              </td>
+              {f.showSqz && (
+                <td className="px-3 py-2 text-center">
+                  {s.squeezeScore !== undefined
+                    ? <SqueezeBadge score={s.squeezeScore} />
+                    : <span className="text-neutral-600">—</span>}
+                </td>
+              )}
               <td className="px-3 py-2">
                 <ConfBadges signal={s} />
               </td>
@@ -363,22 +385,12 @@ function SignalTable({ signals }: { signals: Signal[] }) {
                 {new Date(s.barTime).toISOString().slice(5, 16).replace("T", " ")}
               </td>
               <td className="px-3 py-2">
-                <a
-                  href={tradingViewUrl(s)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-xs text-blue-400 hover:text-blue-300"
-                  title="Open Binance perpetual chart on TradingView"
-                >
+                <a href={tradingViewUrl(s)} target="_blank" rel="noopener noreferrer"
+                  className="text-xs text-blue-400 hover:text-blue-300" title="Open on TradingView">
                   TV →
                 </a>
-                <a
-                  href={binanceFuturesUrl(s.symbol)}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="ml-3 text-xs text-amber-400 hover:text-amber-300"
-                  title="Open Binance Futures chart"
-                >
+                <a href={binanceFuturesUrl(s.symbol)} target="_blank" rel="noopener noreferrer"
+                  className="ml-3 text-xs text-amber-400 hover:text-amber-300" title="Open Binance Futures chart">
                   BN
                 </a>
               </td>
