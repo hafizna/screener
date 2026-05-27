@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { DeltaBias, FRBias, ScanResult, Signal, Timeframe } from "@/lib/types";
+import type { DeltaBias, FRBias, LsBias, MarketRegime, ScanResult, Signal, SignalType, Timeframe } from "@/lib/types";
 
 type ApiResponse = (ScanResult & { stale: boolean; ageMs: number }) | {
   scannedAt: null;
@@ -17,15 +17,20 @@ const TIMEFRAME_MS: Record<Timeframe, number> = {
   "4h": 4 * 60 * 60_000,
 };
 
-// Confluence score: each of the 5 factors contributes ±1.
-// Range: −5 (everything opposed) to +5 (everything aligned).
+// Confluence score: each of the 6 factors contributes ±1.
+// Range: −6 (everything opposed) to +6 (everything aligned).
 function confluenceScore(s: Signal): number {
   const htf4h = s.bias4h === s.side ? 1 : s.bias4h && s.bias4h !== "neutral" && s.bias4h !== s.side ? -1 : 0;
   const htf1h = s.bias1h === s.side ? 1 : s.bias1h && s.bias1h !== "neutral" && s.bias1h !== s.side ? -1 : 0;
   const fr    = s.frBias    === "favorable" ? 1 : s.frBias    === "unfavorable" ? -1 : 0;
   const delta = s.deltaBias === "aligned"   ? 1 : s.deltaBias === "opposed"     ? -1 : 0;
   const oi    = s.oiBias    === "rising"    ? 1 : s.oiBias    === "falling"     ? -1 : 0;
-  return htf4h + htf1h + fr + delta + oi;
+  const ls    = s.lsBias
+    ? (s.side === "long"
+        ? s.lsBias === "crowded_shorts" ? 1 : s.lsBias === "crowded_longs" ? -1 : 0
+        : s.lsBias === "crowded_longs"  ? 1 : s.lsBias === "crowded_shorts" ? -1 : 0)
+    : 0;
+  return htf4h + htf1h + fr + delta + oi + ls;
 }
 
 export default function DashboardPage() {
@@ -39,6 +44,7 @@ export default function DashboardPage() {
   const [minZ, setMinZ] = useState<2 | 3>(2);
   const [frFilter, setFrFilter] = useState<"all" | "favorable">("all");
   const [minScore, setMinScore] = useState<number>(0);
+  const [typeFilter, setTypeFilter] = useState<"all" | "bounce" | "continuation">("all");
 
   async function refresh() {
     setLoading(true);
@@ -78,9 +84,10 @@ export default function DashboardPage() {
       if (s.zLevel < minZ) return false;
       if (frFilter === "favorable" && s.frBias !== "favorable") return false;
       if (confluenceScore(s) < minScore) return false;
+      if (typeFilter !== "all" && s.signalType !== typeFilter) return false;
       return true;
     });
-  }, [activeSignals, tfFilter, sideFilter, minZ, frFilter, minScore]);
+  }, [activeSignals, tfFilter, sideFilter, minZ, frFilter, minScore, typeFilter]);
 
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100 px-3 py-4 sm:px-6 sm:py-6">
@@ -98,17 +105,22 @@ export default function DashboardPage() {
       </header>
 
       {data && data.scannedAt !== null && (
-        <div
-          className={`mb-4 px-3 py-2 rounded-md text-sm ${
-            data.stale ? "bg-amber-950/40 border border-amber-900/60 text-amber-200" : "bg-neutral-900 border border-neutral-800 text-neutral-300"
-          }`}
-        >
-          Last scan: {new Date(data.scannedAt).toLocaleString()} ·{" "}
-          {data.symbolsScanned} symbols · {activeSignals.length} active signals
-          {expiredCount > 0 && ` · ${expiredCount} expired hidden`}
-          {data.stale && " · stale, check cron"}
-          {data.symbolsErrored.length > 0 && ` · ${data.symbolsErrored.length} errors`}
-        </div>
+        <>
+          {"regime" in data && data.regime && (
+            <RegimeBanner regime={data.regime as MarketRegime} summary={"regimeSummary" in data ? data.regimeSummary as string : ""} />
+          )}
+          <div
+            className={`mb-4 px-3 py-2 rounded-md text-sm ${
+              data.stale ? "bg-amber-950/40 border border-amber-900/60 text-amber-200" : "bg-neutral-900 border border-neutral-800 text-neutral-300"
+            }`}
+          >
+            Last scan: {new Date(data.scannedAt).toLocaleString()} ·{" "}
+            {data.symbolsScanned} symbols · {activeSignals.length} active signals
+            {expiredCount > 0 && ` · ${expiredCount} expired hidden`}
+            {data.stale && " · stale, check cron"}
+            {data.symbolsErrored.length > 0 && ` · ${data.symbolsErrored.length} errors`}
+          </div>
+        </>
       )}
 
       {data && data.scannedAt === null && (
@@ -161,6 +173,11 @@ export default function DashboardPage() {
               {n === 0 ? "All" : `≥ ${n}`}
             </Chip>
           ))}
+        </FilterGroup>
+        <FilterGroup label="Type">
+          <Chip active={typeFilter === "all"}          onClick={() => setTypeFilter("all")}>All</Chip>
+          <Chip active={typeFilter === "bounce"}       onClick={() => setTypeFilter("bounce")}>Bounce</Chip>
+          <Chip active={typeFilter === "continuation"} onClick={() => setTypeFilter("continuation")}>Cont.</Chip>
         </FilterGroup>
         <div className="ml-auto text-sm text-neutral-400">
           {filtered.length} signal{filtered.length === 1 ? "" : "s"}
@@ -218,8 +235,9 @@ function SignalTable({ signals }: { signals: Signal[] }) {
       <table className="w-full text-sm min-w-[1080px]">
         <thead className="bg-neutral-900 text-neutral-400 text-left">
           <tr>
-            <th className="px-3 py-2 font-normal" title="Confluence score: HTF4H + HTF1H + FR + Delta + OI, each ±1. Max +5.">Score</th>
+            <th className="px-3 py-2 font-normal" title="Confluence score: HTF4H + HTF1H + FR + Delta + OI + L/S, each ±1. Max +6.">Score</th>
             <th className="px-3 py-2 font-normal">Symbol</th>
+            <th className="px-3 py-2 font-normal" title="Signal type given current market regime.">Type</th>
             <th className="px-3 py-2 font-normal">TF</th>
             <th className="px-3 py-2 font-normal">Side</th>
             <th className="px-3 py-2 font-normal">HTF bias</th>
@@ -227,6 +245,7 @@ function SignalTable({ signals }: { signals: Signal[] }) {
             <th className="px-3 py-2 font-normal" title="Last settled funding rate. Positive = longs pay; negative = shorts pay.">FR</th>
             <th className="px-3 py-2 font-normal text-right" title="Fraction of trigger bar volume that were taker buy orders.">Buy%</th>
             <th className="px-3 py-2 font-normal text-right" title="Open interest % change over the last 4 × 15m periods. Rising OI = new money entering.">OI Δ</th>
+            <th className="px-3 py-2 font-normal text-right" title="Global long/short account ratio. <0.85 = crowded shorts, >1.20 = crowded longs.">L/S</th>
             <th className="px-3 py-2 font-normal">Conf</th>
             <th className="px-3 py-2 font-normal">Trigger</th>
             <th
@@ -261,6 +280,7 @@ function SignalTable({ signals }: { signals: Signal[] }) {
                 <ScoreBadge score={confluenceScore(s)} />
               </td>
               <td className="px-3 py-2 font-medium">{s.symbol}</td>
+              <td className="px-3 py-2"><SignalTypeBadge type={s.signalType} /></td>
               <td className="px-3 py-2 text-neutral-400">{s.timeframe}</td>
               <td
                 className={`px-3 py-2 ${
@@ -292,6 +312,13 @@ function SignalTable({ signals }: { signals: Signal[] }) {
               <td className="px-3 py-2 text-right">
                 {s.oiChangePct !== undefined ? (
                   <OIBadge changePct={s.oiChangePct} bias={s.oiBias} />
+                ) : (
+                  <span className="text-neutral-600">—</span>
+                )}
+              </td>
+              <td className="px-3 py-2 text-right">
+                {s.longShortRatio !== undefined ? (
+                  <LSBadge ratio={s.longShortRatio} bias={s.lsBias} />
                 ) : (
                   <span className="text-neutral-600">—</span>
                 )}
@@ -378,17 +405,63 @@ function DeltaBadge({ ratio, bias, side }: { ratio: number; bias?: DeltaBias; si
   );
 }
 
+function RegimeBanner({ regime, summary }: { regime: MarketRegime; summary: string }) {
+  const styles =
+    regime === "flush"     ? "bg-orange-950/50 border-orange-800/60 text-orange-200" :
+    regime === "breakout"  ? "bg-emerald-950/50 border-emerald-800/60 text-emerald-200" :
+                             "bg-neutral-900 border-neutral-800 text-neutral-400";
+  const icon =
+    regime === "flush"    ? "🔴" :
+    regime === "breakout" ? "🟢" : "⚪";
+  const label =
+    regime === "flush"    ? "FLUSH — bouncing alts mode" :
+    regime === "breakout" ? "BREAKOUT — trend continuation mode" :
+                            "NEUTRAL — standard scan";
+  return (
+    <div className={`mb-3 px-3 py-2 rounded-md text-sm border flex items-center gap-2 ${styles}`}>
+      <span>{icon}</span>
+      <span className="font-medium">{label}</span>
+      <span className="text-xs opacity-70 ml-1">{summary}</span>
+    </div>
+  );
+}
+
+function SignalTypeBadge({ type }: { type?: SignalType }) {
+  if (!type || type === "standard") return <span className="text-neutral-600 text-xs">—</span>;
+  const styles =
+    type === "bounce"       ? "bg-orange-950/60 text-orange-300 border-orange-800/50" :
+                              "bg-blue-950/60 text-blue-300 border-blue-800/50";
+  const label = type === "bounce" ? "bounce" : "cont.";
+  return (
+    <span className={`px-1.5 py-0.5 text-xs rounded border ${styles}`}>{label}</span>
+  );
+}
+
+function LSBadge({ ratio, bias }: { ratio: number; bias?: LsBias }) {
+  const styles =
+    bias === "crowded_shorts" ? "text-emerald-400" :
+    bias === "crowded_longs"  ? "text-red-400"     : "text-neutral-400";
+  return (
+    <span
+      className={`tabular-nums text-xs ${styles}`}
+      title={`L/S ratio ${ratio.toFixed(2)} — ${bias === "crowded_shorts" ? "more shorts than longs" : bias === "crowded_longs" ? "more longs than shorts" : "balanced"}`}
+    >
+      {ratio.toFixed(2)}
+    </span>
+  );
+}
+
 function ScoreBadge({ score }: { score: number }) {
   const styles =
-    score >= 4  ? "bg-emerald-500  text-white border-emerald-400" :
-    score >= 2  ? "bg-emerald-900  text-emerald-300 border-emerald-700" :
+    score >= 5  ? "bg-emerald-500  text-white border-emerald-400" :
+    score >= 3  ? "bg-emerald-900  text-emerald-300 border-emerald-700" :
     score >= 0  ? "bg-neutral-800  text-neutral-300 border-neutral-700" :
                   "bg-red-950      text-red-400 border-red-900";
   const sign = score > 0 ? "+" : "";
   return (
     <span
       className={`inline-flex items-center justify-center w-8 h-6 rounded text-xs font-medium border tabular-nums ${styles}`}
-      title={`Confluence score ${sign}${score} / 5 (HTF4H + HTF1H + FR + Delta + OI)`}
+      title={`Confluence score ${sign}${score} / 6 (HTF4H + HTF1H + FR + Delta + OI + L/S)`}
     >
       {sign}{score}
     </span>

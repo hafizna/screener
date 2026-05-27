@@ -14,6 +14,15 @@ export type FRBias = "favorable" | "neutral" | "unfavorable";
 // Whether the trigger bar's taker buy pressure aligns with the signal direction.
 export type DeltaBias = "aligned" | "neutral" | "opposed";
 
+// Global long/short account positioning for a symbol.
+export type LsBias = "crowded_shorts" | "balanced" | "crowded_longs";
+
+// High-level market regime derived from BTC 4H price action + FR.
+export type MarketRegime = "flush" | "neutral" | "breakout";
+
+// What kind of setup the signal represents given the current regime.
+export type SignalType = "bounce" | "continuation" | "standard";
+
 export interface Kline {
   openTime: number;   // ms
   open: number;
@@ -75,6 +84,11 @@ export interface Signal {
   // Rising OI = new money entering the market (confirms either direction).
   oiChangePct?: number;
   oiBias?: "rising" | "flat" | "falling";
+  // Global long/short account ratio at signal time.
+  longShortRatio?: number;  // > 1 = more longs, < 1 = more shorts
+  lsBias?: LsBias;
+  // What kind of setup this is given the current market regime.
+  signalType?: SignalType;
 }
 
 export interface ScanResult {
@@ -83,4 +97,7 @@ export interface ScanResult {
   symbolsScanned: number;
   symbolsErrored: string[];
   signals: Signal[];
+  // Market regime at scan time, derived from BTC 4H + FR.
+  regime?: MarketRegime;
+  regimeSummary?: string;
 }

@@ -1,29 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
-import { fetchFundingRates, fetchKlines, fetchOIHistory, fetchTopSymbolsByVolume, withConcurrency } from "@/lib/binance";
-import type { FRBias } from "@/lib/types";
+import {
+  fetchFundingRates,
+  fetchKlines,
+  fetchLongShortRatio,
+  fetchOIHistory,
+  fetchTopSymbolsByVolume,
+  withConcurrency,
+} from "@/lib/binance";
+import { detectBTCRegime } from "@/lib/regime";
+import type { FRBias, LsBias, MarketRegime, Signal, SignalType, ScanResult } from "@/lib/types";
 import { analyzeBias } from "@/lib/bias";
 import { detectSignal } from "@/lib/signals";
 import { storeScanResult } from "@/lib/kv";
-import type { Signal, ScanResult } from "@/lib/types";
 
-// Vercel function config — needs the extended timeout that comes with Pro plan
-// (or with fluid compute on Hobby — set to 60s and it works on either).
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
-const SYMBOL_LIMIT = parseInt(process.env.SYMBOL_LIMIT ?? "150", 10);
-const CONCURRENCY = parseInt(process.env.FETCH_CONCURRENCY ?? "20", 10);
+const SYMBOL_LIMIT  = parseInt(process.env.SYMBOL_LIMIT     ?? "150", 10);
+const CONCURRENCY   = parseInt(process.env.FETCH_CONCURRENCY ?? "20",  10);
 
-// Vercel cron hits this with header `Authorization: Bearer ${CRON_SECRET}`.
-// External cron (cron-job.org) does the same — set a custom header in their UI.
 function authorize(req: NextRequest): boolean {
   const expected = process.env.CRON_SECRET;
-  if (!expected) {
-    // If no secret configured, allow only in dev. Block in prod.
-    return process.env.NODE_ENV !== "production";
-  }
-  const got = req.headers.get("authorization");
-  return got === `Bearer ${expected}`;
+  if (!expected) return process.env.NODE_ENV !== "production";
+  return req.headers.get("authorization") === `Bearer ${expected}`;
 }
 
 export async function GET(req: NextRequest) {
@@ -33,7 +32,7 @@ export async function GET(req: NextRequest) {
 
   const t0 = Date.now();
 
-  // 1. Pick the symbol universe
+  // 1. Symbol universe
   let symbols: string[];
   try {
     symbols = await fetchTopSymbolsByVolume(SYMBOL_LIMIT);
@@ -44,32 +43,49 @@ export async function GET(req: NextRequest) {
     );
   }
 
-  // 2. Fetch funding rates for all symbols in one call before the main loop.
-  //    Weight: 10. Non-fatal — scan continues without FR data if this fails.
-  const fundingRates = await fetchFundingRates().catch((e: Error) => {
-    console.warn("FR fetch failed, proceeding without FR data:", e.message);
-    return new Map<string, { lastFundingRate: number }>();
-  });
+  // 2. Pre-loop batch fetches — run in parallel, all non-fatal.
+  //    fundingRates : one call for all symbols (weight 10)
+  //    btcKlines4h  : BTC 4H for regime detection (weight 2)
+  const [fundingRates, btcKlines4h] = await Promise.all([
+    fetchFundingRates().catch((e: Error) => {
+      console.warn("FR fetch failed:", e.message);
+      return new Map<string, { lastFundingRate: number }>();
+    }),
+    fetchKlines("BTCUSDT", "4h").catch(() => null),
+  ]);
 
-  // 3. Fan out with bounded concurrency. Entry is 15m only; 1H/4H
-  // are fetched only after a raw trigger exists, so the scan stays light.
+  // 3. Detect market regime from BTC 4H + BTC FR
+  const btcFR = fundingRates.get("BTCUSDT")?.lastFundingRate ?? 0;
+  const regimeResult = btcKlines4h
+    ? detectBTCRegime(btcKlines4h, btcFR)
+    : { regime: "neutral" as const, btcMomentum12h: 0, btcFR: 0, summary: "BTC data unavailable" };
+
+  const regime = regimeResult.regime;
+
+  // 4. Main scan loop — 15m signal detection, then HTF enrichment only if triggered.
   const results = await withConcurrency(symbols, CONCURRENCY, async (symbol) => {
     const entryKlines = await fetchKlines(symbol, "15m");
     const signal = detectSignal(symbol, "15m", entryKlines);
     if (!signal) return null;
 
-    const [oneHourKlines, fourHourKlines, oiHistory] = await Promise.all([
+    const [oneHourKlines, fourHourKlines, oiHistory, lsData] = await Promise.all([
       fetchKlines(symbol, "1h"),
       fetchKlines(symbol, "4h"),
-      fetchOIHistory(symbol).catch(() => null), // non-fatal
+      fetchOIHistory(symbol).catch(() => null),
+      fetchLongShortRatio(symbol).catch(() => null),
     ]);
 
     const bias1h = analyzeBias(oneHourKlines);
     const bias4h = analyzeBias(fourHourKlines);
-    if (!passesBiasConfirmation(signal, bias1h, bias4h)) return null;
+    if (!passesBiasConfirmation(signal, bias1h, bias4h, regime)) return null;
 
+    // FR — interpretation flips in flush regime for longs
     const frInfo = fundingRates.get(symbol);
+    const frBias = frInfo !== undefined
+      ? classifyFR(signal.side, frInfo.lastFundingRate, regime)
+      : undefined;
 
+    // OI
     let oiChangePct: number | undefined;
     let oiBias: "rising" | "flat" | "falling" | undefined;
     if (oiHistory && oiHistory.length >= 2) {
@@ -81,92 +97,132 @@ export async function GET(req: NextRequest) {
       }
     }
 
+    // L/S ratio
+    const longShortRatio = lsData?.longShortRatio;
+    const lsBias: LsBias | undefined = longShortRatio !== undefined
+      ? longShortRatio < 0.85 ? "crowded_shorts"
+      : longShortRatio > 1.20 ? "crowded_longs"
+      : "balanced"
+      : undefined;
+
+    // Signal type — what kind of setup is this given the regime?
+    const signalType = determineSignalType(signal.side, regime, lsBias, frBias);
+
     return {
       ...signal,
-      bias1h: bias1h.bias,
-      bias4h: bias4h.bias,
+      bias1h:      bias1h.bias,
+      bias4h:      bias4h.bias,
       biasScore1h: bias1h.score,
       biasScore4h: bias4h.score,
-      ...(frInfo !== undefined
-        ? { fundingRate: frInfo.lastFundingRate, frBias: classifyFR(signal.side, frInfo.lastFundingRate) }
-        : {}),
+      ...(frInfo !== undefined ? { fundingRate: frInfo.lastFundingRate, frBias } : {}),
       ...(oiChangePct !== undefined ? { oiChangePct, oiBias } : {}),
+      ...(longShortRatio !== undefined ? { longShortRatio, lsBias } : {}),
+      signalType,
     };
   });
 
-  // 3. Collect signals and errors
+  // 5. Collect
   const signals: Signal[] = [];
   const errored: string[] = [];
   for (const r of results) {
-    if ("error" in r) {
-      errored.push(r.item);
-    } else if (r.result) {
-      signals.push(r.result);
-    }
+    if ("error" in r) errored.push(r.item);
+    else if (r.result)  signals.push(r.result);
   }
 
-  // 4. Rank: HTF agreement + FR + delta + OI alignment, then higher Z.
+  // 6. Rank — HTF + FR + delta + OI + L/S, then Z
   signals.sort((a, b) => {
-    const frWeight    = (sig: Signal) => sig.frBias    === "favorable" ? 1 : sig.frBias    === "unfavorable" ? -1 : 0;
-    const deltaWeight = (sig: Signal) => sig.deltaBias === "aligned"   ? 1 : sig.deltaBias === "opposed"     ? -1 : 0;
-    const oiWeight    = (sig: Signal) => sig.oiBias    === "rising"    ? 1 : sig.oiBias    === "falling"     ? -1 : 0;
-    const scoreA = (a.biasScore4h ?? 0) + (a.biasScore1h ?? 0) + frWeight(a) + deltaWeight(a) + oiWeight(a);
-    const scoreB = (b.biasScore4h ?? 0) + (b.biasScore1h ?? 0) + frWeight(b) + deltaWeight(b) + oiWeight(b);
+    const frW    = (s: Signal) => s.frBias    === "favorable"     ? 1 : s.frBias    === "unfavorable"  ? -1 : 0;
+    const dW     = (s: Signal) => s.deltaBias === "aligned"       ? 1 : s.deltaBias === "opposed"      ? -1 : 0;
+    const oiW    = (s: Signal) => s.oiBias    === "rising"        ? 1 : s.oiBias    === "falling"      ? -1 : 0;
+    const lsW    = (s: Signal) => {
+      if (!s.lsBias) return 0;
+      const favored = s.side === "long" ? "crowded_shorts" : "crowded_longs";
+      const opposed = s.side === "long" ? "crowded_longs"  : "crowded_shorts";
+      return s.lsBias === favored ? 1 : s.lsBias === opposed ? -1 : 0;
+    };
+    const scoreA = (a.biasScore4h ?? 0) + (a.biasScore1h ?? 0) + frW(a) + dW(a) + oiW(a) + lsW(a);
+    const scoreB = (b.biasScore4h ?? 0) + (b.biasScore1h ?? 0) + frW(b) + dW(b) + oiW(b) + lsW(b);
     if (scoreB !== scoreA) return scoreB - scoreA;
     if (b.zLevel !== a.zLevel) return b.zLevel - a.zLevel;
     return Math.abs(b.zScore) - Math.abs(a.zScore);
   });
 
   const scanResult: ScanResult = {
-    scannedAt: Date.now(),
-    durationMs: Date.now() - t0,
-    symbolsScanned: symbols.length,
-    symbolsErrored: errored,
+    scannedAt:       Date.now(),
+    durationMs:      Date.now() - t0,
+    symbolsScanned:  symbols.length,
+    symbolsErrored:  errored,
     signals,
+    regime:          regimeResult.regime,
+    regimeSummary:   regimeResult.summary,
   };
 
   try {
     await storeScanResult(scanResult);
   } catch (e) {
-    // Don't fail the whole scan if KV write fails — return the result so a
-    // human-triggered run still surfaces info, and log loudly.
     console.error("KV write failed", e);
-    return NextResponse.json(
-      { ...scanResult, kvError: (e as Error).message },
-      { status: 200 }
-    );
+    return NextResponse.json({ ...scanResult, kvError: (e as Error).message }, { status: 200 });
   }
 
   return NextResponse.json({
-    scannedAt: scanResult.scannedAt,
-    durationMs: scanResult.durationMs,
+    scannedAt:      scanResult.scannedAt,
+    durationMs:     scanResult.durationMs,
     symbolsScanned: scanResult.symbolsScanned,
-    signalsFound: scanResult.signals.length,
-    errors: scanResult.symbolsErrored.length,
+    signalsFound:   scanResult.signals.length,
+    errors:         scanResult.symbolsErrored.length,
+    regime:         scanResult.regime,
   });
 }
 
-// Positive FR = longs pay shorts; negative = shorts pay longs.
-// Favorable for longs: negative FR (shorts crowded, squeeze potential).
-// Favorable for shorts: FR ≥ +0.05% per 8h (longs overextended, paid to be short).
-// Unfavorable: FR is clearly working against the signal side.
-function classifyFR(side: "long" | "short", fr: number): FRBias {
-  if (side === "long") {
-    if (fr < 0) return "favorable";
-    if (fr > 0.001) return "unfavorable"; // > +0.10% per 8h — longs very crowded
-    return "neutral";
-  } else {
-    if (fr > 0.0005) return "favorable";  // > +0.05% per 8h — longs paying
-    if (fr < 0) return "unfavorable";
-    return "neutral";
-  }
-}
+// ─── helpers ─────────────────────────────────────────────────────────────────
 
+// In FLUSH regime, long signals with bearish HTF are contrarian bounces — don't block them.
+// Shorts confirmed normally; so do all non-flush signals.
 type Bias = ReturnType<typeof analyzeBias>;
-
-function passesBiasConfirmation(signal: Signal, bias1h: Bias, bias4h: Bias): boolean {
+function passesBiasConfirmation(
+  signal: Signal,
+  bias1h: Bias,
+  bias4h: Bias,
+  regime: MarketRegime
+): boolean {
+  if (regime === "flush" && signal.side === "long") return true;
   const opposite = signal.side === "long" ? "short" : "long";
   if (bias4h.bias === opposite || bias1h.bias === opposite) return false;
   if (bias4h.bias === signal.side || bias1h.bias === signal.side) return true;
   return Math.abs(bias4h.score) >= 3 && Math.abs(bias1h.score) <= 1;
+}
+
+// FR classification is regime-aware.
+// In a FLUSH for longs: high positive FR = shorts overcrowded at support = squeeze fuel → FAVORABLE.
+// In all other cases: standard logic.
+function classifyFR(side: "long" | "short", fr: number, regime: MarketRegime): FRBias {
+  if (regime === "flush" && side === "long") {
+    if (fr > 0.0005) return "favorable";  // > +0.05%: shorts are paying, crowded
+    if (fr < 0)      return "neutral";    // negative FR in flush = unusual
+    return "neutral";
+  }
+  if (side === "long") {
+    if (fr < 0)    return "favorable";
+    if (fr > 0.001) return "unfavorable"; // > +0.10%: longs crowded in normal market
+    return "neutral";
+  }
+  // short
+  if (fr > 0.0005) return "favorable";
+  if (fr < 0)      return "unfavorable";
+  return "neutral";
+}
+
+function determineSignalType(
+  side: "long" | "short",
+  regime: MarketRegime,
+  lsBias?: LsBias,
+  frBias?: FRBias
+): SignalType {
+  if (regime === "flush" && side === "long") {
+    // Bounce: flush + long + at least one confirming squeeze factor
+    if (lsBias === "crowded_shorts" || frBias === "favorable") return "bounce";
+    return "bounce"; // still a bounce candidate even without extra confirmation
+  }
+  if (regime === "breakout" && side === "long") return "continuation";
+  return "standard";
 }

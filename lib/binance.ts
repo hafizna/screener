@@ -111,6 +111,38 @@ export async function fetchTopSymbolsByVolume(
   return usdtPairs.slice(0, limit).map((d) => d.symbol);
 }
 
+export interface LongShortRatioInfo {
+  longShortRatio: number; // longAccount / shortAccount; >1 = more longs, <1 = more shorts
+  longAccount: number;    // fraction of accounts holding longs (0–1)
+  shortAccount: number;   // fraction of accounts holding shorts (0–1)
+}
+
+// Global long/short account ratio for a single symbol. Weight: 1.
+// Called only for symbols that already have a confirmed signal.
+export async function fetchLongShortRatio(
+  symbol: string,
+  signal?: AbortSignal
+): Promise<LongShortRatioInfo | null> {
+  const url = `${FAPI_BASE}/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=5m&limit=1`;
+  let res: Response;
+  try {
+    res = await fetch(url, { signal, cache: "no-store" });
+  } catch { return null; }
+  if (!res.ok) return null;
+  const data = (await res.json()) as Array<{
+    longShortRatio: string;
+    longAccount: string;
+    shortAccount: string;
+  }>;
+  if (!data.length) return null;
+  const d = data[0];
+  return {
+    longShortRatio: parseFloat(d.longShortRatio),
+    longAccount:    parseFloat(d.longAccount),
+    shortAccount:   parseFloat(d.shortAccount),
+  };
+}
+
 export interface OISnapshot {
   openInterest: number; // sumOpenInterest in base asset
   timestamp: number;
