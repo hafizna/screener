@@ -89,6 +89,16 @@ export interface Signal {
   lsBias?: LsBias;
   // What kind of setup this is given the current market regime.
   signalType?: SignalType;
+  // ATR-based targets (from 1H klines, 14-period SMA ATR)
+  atr1h?: number;
+  tp1?: number;     // entry + 1.5 × ATR (long) or entry - 1.5 × ATR (short)
+  tp2?: number;     // entry + 3.0 × ATR (long) or entry - 3.0 × ATR (short)
+  sl?: number;      // entry - 1.0 × ATR (long) or entry + 1.0 × ATR (short)
+  // Relative Strength vs BTC over last 4 × 4H bars
+  relativeStrength?: number;  // >1 = outperforming BTC
+  rsBias?: "strong" | "neutral" | "weak";
+  // Bounce quality composite (0–6)
+  squeezeScore?: number;
 }
 
 export interface ScanResult {

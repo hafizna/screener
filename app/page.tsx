@@ -232,10 +232,10 @@ function SignalTable({ signals }: { signals: Signal[] }) {
   return (
     <div className="rounded-md border border-neutral-800 overflow-hidden">
       <div className="overflow-x-auto">
-      <table className="w-full text-sm min-w-[1080px]">
+      <table className="w-full text-sm min-w-[1360px]">
         <thead className="bg-neutral-900 text-neutral-400 text-left">
           <tr>
-            <th className="px-3 py-2 font-normal" title="Confluence score: HTF4H + HTF1H + FR + Delta + OI + L/S, each ±1. Max +6.">Score</th>
+            <th className="px-3 py-2 font-normal" title="Confluence score: HTF4H + HTF1H + FR + Delta + OI + L/S + RS, each ±1. Max +7.">Score</th>
             <th className="px-3 py-2 font-normal">Symbol</th>
             <th className="px-3 py-2 font-normal" title="Signal type given current market regime.">Type</th>
             <th className="px-3 py-2 font-normal">TF</th>
@@ -246,25 +246,33 @@ function SignalTable({ signals }: { signals: Signal[] }) {
             <th className="px-3 py-2 font-normal text-right" title="Fraction of trigger bar volume that were taker buy orders.">Buy%</th>
             <th className="px-3 py-2 font-normal text-right" title="Open interest % change over the last 4 × 15m periods. Rising OI = new money entering.">OI Δ</th>
             <th className="px-3 py-2 font-normal text-right" title="Global long/short account ratio. <0.85 = crowded shorts, >1.20 = crowded longs.">L/S</th>
+            <th className="px-3 py-2 font-normal text-right" title="Relative strength vs BTC over last 4 × 4H bars. >1.1 = outperforming BTC.">RS</th>
+            <th className="px-3 py-2 font-normal text-center" title="Squeeze potential score (0–6): L/S positioning + FR magnitude + OI + RS divergence.">Sqz</th>
             <th className="px-3 py-2 font-normal">Conf</th>
             <th className="px-3 py-2 font-normal">Trigger</th>
             <th
               className="px-3 py-2 font-normal text-right"
               title="Market Profile level touched by the trigger candle wick"
             >
-              Level touched
+              Level
             </th>
             <th
               className="px-3 py-2 font-normal text-right"
               title="Close price of the trigger candle"
             >
-              Bar close
+              Close
+            </th>
+            <th
+              className="px-3 py-2 font-normal text-right"
+              title="ATR-based targets: SL · TP1 (1.5×ATR) · TP2 (3×ATR)"
+            >
+              SL · TP1 · TP2
             </th>
             <th
               className="px-3 py-2 font-normal text-right"
               title="How long the signal remains actionable before the next candle closes"
             >
-              Valid for
+              Valid
             </th>
             <th className="px-3 py-2 font-normal">Time</th>
             <th className="px-3 py-2 font-normal"></th>
@@ -323,6 +331,20 @@ function SignalTable({ signals }: { signals: Signal[] }) {
                   <span className="text-neutral-600">—</span>
                 )}
               </td>
+              <td className="px-3 py-2 text-right">
+                {s.relativeStrength !== undefined ? (
+                  <RSBadge rs={s.relativeStrength} bias={s.rsBias} side={s.side} />
+                ) : (
+                  <span className="text-neutral-600">—</span>
+                )}
+              </td>
+              <td className="px-3 py-2 text-center">
+                {s.squeezeScore !== undefined ? (
+                  <SqueezeBadge score={s.squeezeScore} />
+                ) : (
+                  <span className="text-neutral-600">—</span>
+                )}
+              </td>
               <td className="px-3 py-2">
                 <ConfBadges signal={s} />
               </td>
@@ -331,6 +353,9 @@ function SignalTable({ signals }: { signals: Signal[] }) {
                 {formatPrice(s.triggerPrice)}
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{formatPrice(s.barClose)}</td>
+              <td className="px-3 py-2 text-right">
+                <TargetsCell signal={s} />
+              </td>
               <td className="px-3 py-2 text-right text-xs tabular-nums text-amber-300">
                 {formatRemaining(signalExpiresAt(s) - Date.now())}
               </td>
@@ -479,6 +504,68 @@ function OIBadge({ changePct, bias }: { changePct: number; bias?: "rising" | "fl
       title={`OI changed ${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}% over last 4 × 15m periods`}
     >
       {arrow}{Math.abs(changePct).toFixed(2)}%
+    </span>
+  );
+}
+
+function RSBadge({ rs, bias, side }: { rs: number; bias?: Signal["rsBias"]; side: "long" | "short" }) {
+  const aligned = (side === "long" && bias === "strong") || (side === "short" && bias === "weak");
+  const opposed = (side === "long" && bias === "weak")   || (side === "short" && bias === "strong");
+  const styles = aligned ? "text-emerald-400" : opposed ? "text-red-400" : "text-neutral-400";
+  const arrow = bias === "strong" ? "↑" : bias === "weak" ? "↓" : "";
+  return (
+    <span
+      className={`tabular-nums text-xs ${styles}`}
+      title={`Relative strength vs BTC: ${rs.toFixed(3)} (>1.1 = outperforming, <0.9 = underperforming)`}
+    >
+      {arrow}{rs.toFixed(2)}
+    </span>
+  );
+}
+
+function SqueezeBadge({ score }: { score: number }) {
+  const styles =
+    score >= 5 ? "bg-orange-500   text-white border-orange-400" :
+    score >= 3 ? "bg-orange-950/70 text-orange-300 border-orange-700/60" :
+    score >= 1 ? "bg-neutral-800   text-neutral-300 border-neutral-700" :
+                 "bg-neutral-900   text-neutral-600 border-neutral-800";
+  return (
+    <span
+      className={`inline-flex items-center justify-center w-7 h-6 rounded text-xs font-medium border tabular-nums ${styles}`}
+      title={`Squeeze potential score ${score}/6 (L/S positioning + FR magnitude + OI rising + RS divergence)`}
+    >
+      {score}
+    </span>
+  );
+}
+
+function TargetsCell({ signal: s }: { signal: Signal }) {
+  if (s.tp1 === undefined || s.tp2 === undefined || s.sl === undefined) {
+    return <span className="text-neutral-600 text-xs">—</span>;
+  }
+  const isLong = s.side === "long";
+  return (
+    <span className="flex gap-1.5 justify-end text-xs tabular-nums">
+      <span
+        className="text-red-400"
+        title={`Stop loss: ${formatPrice(s.sl)} (1× ATR below entry)`}
+      >
+        {formatPrice(s.sl)}
+      </span>
+      <span className="text-neutral-600">·</span>
+      <span
+        className={isLong ? "text-emerald-300" : "text-pink-300"}
+        title={`TP1: ${formatPrice(s.tp1)} (1.5× ATR)`}
+      >
+        {formatPrice(s.tp1)}
+      </span>
+      <span className="text-neutral-600">·</span>
+      <span
+        className={isLong ? "text-emerald-400" : "text-pink-400"}
+        title={`TP2: ${formatPrice(s.tp2)} (3× ATR)`}
+      >
+        {formatPrice(s.tp2)}
+      </span>
     </span>
   );
 }

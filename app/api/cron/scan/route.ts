@@ -8,6 +8,7 @@ import {
   withConcurrency,
 } from "@/lib/binance";
 import { detectBTCRegime } from "@/lib/regime";
+import { computeATR, computeRS, computeSqueezeScore } from "@/lib/atr";
 import type { FRBias, LsBias, MarketRegime, Signal, SignalType, ScanResult } from "@/lib/types";
 import { analyzeBias } from "@/lib/bias";
 import { detectSignal } from "@/lib/signals";
@@ -108,6 +109,32 @@ export async function GET(req: NextRequest) {
     // Signal type — what kind of setup is this given the regime?
     const signalType = determineSignalType(signal.side, regime, lsBias, frBias);
 
+    // ATR-based targets from 1H klines
+    const atr1h = computeATR(oneHourKlines, 14);
+    const entry = signal.barClose;
+    const tp1 = atr1h > 0 ? (signal.side === "long" ? entry + 1.5 * atr1h : entry - 1.5 * atr1h) : undefined;
+    const tp2 = atr1h > 0 ? (signal.side === "long" ? entry + 3.0 * atr1h : entry - 3.0 * atr1h) : undefined;
+    const sl  = atr1h > 0 ? (signal.side === "long" ? entry - 1.0 * atr1h : entry + 1.0 * atr1h) : undefined;
+
+    // Relative Strength vs BTC (reuses already-fetched 4H klines)
+    const relativeStrength = btcKlines4h
+      ? computeRS(fourHourKlines, btcKlines4h)
+      : undefined;
+    const rsBias: Signal["rsBias"] =
+      relativeStrength === undefined ? undefined
+      : relativeStrength > 1.1 ? "strong"
+      : relativeStrength < 0.9 ? "weak"
+      : "neutral";
+
+    // Squeeze Potential Score (0–6)
+    const squeezeScore = computeSqueezeScore(
+      signal.side,
+      frInfo?.lastFundingRate,
+      longShortRatio,
+      oiBias,
+      relativeStrength,
+    );
+
     return {
       ...signal,
       bias1h:      bias1h.bias,
@@ -118,6 +145,9 @@ export async function GET(req: NextRequest) {
       ...(oiChangePct !== undefined ? { oiChangePct, oiBias } : {}),
       ...(longShortRatio !== undefined ? { longShortRatio, lsBias } : {}),
       signalType,
+      ...(atr1h > 0 ? { atr1h, tp1, tp2, sl } : {}),
+      ...(relativeStrength !== undefined ? { relativeStrength, rsBias } : {}),
+      squeezeScore,
     };
   });
 
@@ -140,8 +170,9 @@ export async function GET(req: NextRequest) {
       const opposed = s.side === "long" ? "crowded_longs"  : "crowded_shorts";
       return s.lsBias === favored ? 1 : s.lsBias === opposed ? -1 : 0;
     };
-    const scoreA = (a.biasScore4h ?? 0) + (a.biasScore1h ?? 0) + frW(a) + dW(a) + oiW(a) + lsW(a);
-    const scoreB = (b.biasScore4h ?? 0) + (b.biasScore1h ?? 0) + frW(b) + dW(b) + oiW(b) + lsW(b);
+    const rsW    = (s: Signal) => s.rsBias === "strong"           ? 1 : s.rsBias   === "weak"          ? -1 : 0;
+    const scoreA = (a.biasScore4h ?? 0) + (a.biasScore1h ?? 0) + frW(a) + dW(a) + oiW(a) + lsW(a) + rsW(a);
+    const scoreB = (b.biasScore4h ?? 0) + (b.biasScore1h ?? 0) + frW(b) + dW(b) + oiW(b) + lsW(b) + rsW(b);
     if (scoreB !== scoreA) return scoreB - scoreA;
     if (b.zLevel !== a.zLevel) return b.zLevel - a.zLevel;
     return Math.abs(b.zScore) - Math.abs(a.zScore);
