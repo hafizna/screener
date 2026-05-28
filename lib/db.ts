@@ -1,6 +1,11 @@
 import { neon } from "@neondatabase/serverless";
 import type { Signal } from "./types";
 
+const SIGNAL_RETENTION_DAYS = Math.max(
+  1,
+  parseInt(process.env.SIGNAL_RETENTION_DAYS ?? "14", 10) || 14
+);
+
 function getDb() {
   const url = process.env.DATABASE_URL;
   if (!url) return null;
@@ -115,6 +120,56 @@ export interface SignalLog {
   watch_expires_at: number | null;
 }
 
+function toNumber(value: unknown, fallback = 0): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function toNullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function toOutcome(value: unknown): Outcome {
+  return value === "tp1" || value === "tp2" || value === "tp3" || value === "sl" || value === "expired" || value === "active"
+    ? value
+    : "active";
+}
+
+function normalizeSignalLog(row: unknown): SignalLog {
+  const r = row as Record<string, unknown>;
+  return {
+    id: String(r.id ?? ""),
+    symbol: String(r.symbol ?? ""),
+    timeframe: String(r.timeframe ?? ""),
+    side: r.side === "short" ? "short" : "long",
+    signal_type: r.signal_type == null ? null : String(r.signal_type),
+    regime: r.regime == null ? null : String(r.regime),
+    entry_price: toNumber(r.entry_price),
+    tp1: toNullableNumber(r.tp1),
+    tp2: toNullableNumber(r.tp2),
+    tp3: toNullableNumber(r.tp3),
+    sl: toNullableNumber(r.sl),
+    trigger_level: String(r.trigger_level ?? ""),
+    z_level: toNumber(r.z_level),
+    z_score: toNumber(r.z_score),
+    squeeze_score: toNullableNumber(r.squeeze_score),
+    funding_rate: toNullableNumber(r.funding_rate),
+    long_short_ratio: toNullableNumber(r.long_short_ratio),
+    bar_time: toNumber(r.bar_time),
+    scanned_at: toNumber(r.scanned_at),
+    outcome: toOutcome(r.outcome),
+    outcome_at: toNullableNumber(r.outcome_at),
+    outcome_price: toNullableNumber(r.outcome_price),
+    max_favorable: toNullableNumber(r.max_favorable),
+    max_adverse: toNullableNumber(r.max_adverse),
+    watched: Boolean(r.watched),
+    watch_expires_at: toNullableNumber(r.watch_expires_at),
+  };
+}
+
 // ─── Outcome check helpers ────────────────────────────────────────────────────
 export async function getActiveSignals(): Promise<SignalLog[]> {
   const sql = getDb();
@@ -125,7 +180,7 @@ export async function getActiveSignals(): Promise<SignalLog[]> {
     WHERE outcome = 'active' AND bar_time < ${cutoff}
     ORDER BY bar_time ASC
   `;
-  return rows as unknown as SignalLog[];
+  return rows.map(normalizeSignalLog);
 }
 
 export async function updateOutcome(
@@ -172,6 +227,20 @@ export async function expireOldSignals() {
   `;
 }
 
+// Keep Neon storage bounded. Active signals are already expired after 24h, so
+// deleting by bar_time is safe once the retention window has passed.
+export async function pruneOldSignals(): Promise<number> {
+  const sql = getDb();
+  if (!sql) return 0;
+  const cutoff = Date.now() - SIGNAL_RETENTION_DAYS * 24 * 60 * 60_000;
+  const rows = await sql`
+    DELETE FROM signal_log
+    WHERE bar_time < ${cutoff}
+    RETURNING id
+  ` as Array<{ id: string }>;
+  return rows.length;
+}
+
 // ─── Read path ────────────────────────────────────────────────────────────────
 export interface HistoryResult {
   signals: SignalLog[];
@@ -205,7 +274,7 @@ export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
   ]);
 
   const cm = Object.fromEntries(
-    (counts as Array<{ outcome: string; n: number }>).map((r) => [r.outcome, r.n])
+    (counts as Array<{ outcome: string; n: unknown }>).map((r) => [r.outcome, toNumber(r.n)])
   );
   const tp3 = cm["tp3"] ?? 0;
   const tp2 = cm["tp2"] ?? 0;
@@ -215,7 +284,7 @@ export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
   const resolved = tp3 + tp2 + tp1 + sl + exp;
 
   return {
-    signals: rows as unknown as SignalLog[],
+    signals: rows.map(normalizeSignalLog),
     stats: {
       total:   (cm["active"] ?? 0) + resolved,
       active:  cm["active"] ?? 0,
