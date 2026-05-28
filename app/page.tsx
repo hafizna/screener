@@ -1617,7 +1617,7 @@ function GuideModal({ onClose }: { onClose: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/70 p-4 overflow-y-auto" onClick={onClose}>
       <div
-        className="relative mt-8 mb-8 w-full max-w-2xl rounded-lg border border-neutral-700 bg-neutral-900 text-sm text-neutral-300 shadow-xl"
+        className="relative mt-8 mb-8 w-full max-w-3xl rounded-lg border border-neutral-700 bg-neutral-900 text-sm text-neutral-300 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-neutral-800 px-5 py-4">
@@ -1668,6 +1668,22 @@ function GuideModal({ onClose }: { onClose: () => void }) {
             </div>
           </section>
 
+          {/* Entry viability */}
+          <section>
+            <h3 className="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-3">Entry viability</h3>
+            <div className="space-y-2 text-xs text-neutral-500">
+              <p>Entry defaults to setups that are still actionable at the current Binance mark price. Use Entry: All to audit signals that are active but no longer good fresh entries.</p>
+              <div className="grid grid-cols-2 gap-x-6 gap-y-1">
+                <div><span className="text-emerald-300 w-20 inline-block">viable</span><span>close enough to planned entry</span></div>
+                <div><span className="text-emerald-300 w-20 inline-block">better px</span><span>pulled back beyond planned entry, not near SL</span></div>
+                <div><span className="text-amber-300 w-20 inline-block">chasing</span><span>moved more than 0.5 ATR toward target</span></div>
+                <div><span className="text-amber-300 w-20 inline-block">TP1 hit</span><span>fresh entry is late; monitor in Tracked</span></div>
+                <div><span className="text-red-300 w-20 inline-block">near SL</span><span>moved more than 0.75 ATR against entry</span></div>
+                <div><span className="text-red-300 w-20 inline-block">SL crossed</span><span>planned stop already crossed</span></div>
+              </div>
+            </div>
+          </section>
+
           {/* Targets */}
           <section>
             <h3 className="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-3">ATR-based targets (1H, 14-period)</h3>
@@ -1712,7 +1728,7 @@ function GuideModal({ onClose }: { onClose: () => void }) {
           </section>
 
           <p className="text-xs text-neutral-600 border-t border-neutral-800 pt-4">
-            Scans run every 15 minutes via Vercel cron. Signals expire after 72h (unwatched) or your custom hold window (watched). Data is Binance USDT-M futures only.
+            Scans run every 15 minutes via Vercel cron. Entry only shows recent viable signals by default; Tracked monitors all active signals until TP/SL/expiry. Data is Binance USDT-M futures only.
           </p>
         </div>
       </div>

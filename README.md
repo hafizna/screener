@@ -18,19 +18,22 @@ This mirrors the `long_signal` / `short_signal` lines of `market_profile_tpo_v6_
 
 ## How to read the dashboard
 
-- **Entry**: actionable MP+Z triggers from the latest scan. The cron replays the last `RECENT_SIGNAL_BARS` closed candles and the UI still hides expired entries.
-- **Watchlist**: pre-signal alts that are near profile levels but may still need volume, candle direction, or bias confirmation. `Window` is a bias observation window, not an entry validity timer.
-- **History**: persisted Neon outcome tracking for triggered signals.
+- **Radar**: pre-entry candidates near profile levels. These already show provisional entry, SL, TP1, TP2, and TP3 so they can be judged before a trigger fires.
+- **Entry**: fired MP+Z triggers that are still viable at the current Binance mark price. By default the UI hides chasing, TP1-hit, near-SL, and SL-crossed entries; use `Entry: All` to audit them.
+- **Tracked**: all active signals are monitored here automatically, even if you did not star them. Starred signals stay visible as manual bookmarks.
+- **History**: resolved Neon outcome tracking only: TP1, TP2, TP3, SL, or expiry. Active trades stay out of performance stats until they resolve.
 - **TF**: candle timeframe that produced the signal.
 - **Side**: long means a bullish rejection from support-like levels; short means a bearish rejection from resistance-like levels.
 - **HTF bias**: the 4H and 1H rule-based bias that confirmed the 15m trigger.
 - **Z**: volume abnormality on the trigger candle. `LG` is large volume, `EX` is extreme volume.
 - **Trigger**: the market-profile level touched by the trigger candle wick. `PREV_` means the level comes from the previous UTC day.
 - **Level touched**: the exact price of that trigger level.
-- **Bar close**: the close price of the trigger candle. For a long, the candle should reject upward from the touched level; for a short, it should reject downward.
-- **Valid for**: countdown until the signal expires. After expiry, it is hidden from the dashboard on the next refresh.
+- **Entry**: the close price of the trigger candle, used as the planned entry reference.
+- **Now**: the current Binance mark price used for entry viability.
+- **State**: whether the entry is still viable, better than planned, chasing, TP1-hit, near-SL, SL-crossed, or missing mark data.
+- **Valid for**: countdown until the entry signal expires from the Entry tab. Active monitoring continues in Tracked until TP/SL/expiry.
 
-Signals are only treated as actionable for one candle after the trigger candle closes. The dashboard keeps the latest scan in storage, but hides expired signals automatically on refresh so old setups do not look fresh.
+Signals are only treated as actionable while they are recent and price remains close enough to the planned entry. The dashboard keeps the latest scan in storage, but hides expired or no-longer-viable entries by default so old setups do not look fresh.
 
 ## What it does not do
 
@@ -62,7 +65,7 @@ WATCHLIST_LIMIT=30
 ```
 
 `SIGNAL_RETENTION_DAYS` is optional. The cron deletes old `signal_log` rows after this many days so Neon storage stays bounded.
-`RECENT_SIGNAL_BARS` controls how many recently closed 15m candles are replayed each scan, so a valid entry trigger can still be captured if one cron tick missed it. `WATCHLIST_LIMIT` caps the pre-signal bias/watchlist table.
+`RECENT_SIGNAL_BARS` controls how many recently closed 15m candles are replayed each scan, so a valid entry trigger can still be captured if one cron tick missed it. `WATCHLIST_LIMIT` caps the Radar candidate table.
 
 ### 4. Cron
 
