@@ -140,9 +140,18 @@ export default function DashboardPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
-  // Load active/starred signals from DB when user switches to Tracked tab
+  // Load tracked signals on mount + whenever user switches to Tracked tab.
+  // Also auto-refresh every 60s while on the Tracked tab so DB changes surface quickly.
   useEffect(() => {
-    if (tab === "tracked") loadTrackedSignals();
+    loadTrackedSignals();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (tab !== "tracked") return;
+    loadTrackedSignals();
+    const id = setInterval(loadTrackedSignals, 60_000);
+    return () => clearInterval(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -1303,7 +1312,9 @@ function entryViability(signal: Signal): EntryViability {
 }
 
 function isEntryViable(signal: Signal): boolean {
-  return entryViability(signal).status === "viable";
+  const s = entryViability(signal).status;
+  // "unknown" = no mark price → can't judge, show it anyway
+  return s === "viable" || s === "unknown";
 }
 
 function formatBias(signal: Signal): string {
