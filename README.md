@@ -51,8 +51,12 @@ Standard Next.js deploy. Vercel auto-detects the framework.
 ```
 UPSTASH_REDIS_REST_URL=https://...upstash.io
 UPSTASH_REDIS_REST_TOKEN=...
+DATABASE_URL=postgresql://...
 CRON_SECRET=<openssl rand -hex 32>
+SIGNAL_RETENTION_DAYS=14
 ```
+
+`SIGNAL_RETENTION_DAYS` is optional. The cron deletes old `signal_log` rows after this many days so Neon storage stays bounded.
 
 ### 4. Cron
 
@@ -97,6 +101,8 @@ Binance fapi  →  Vercel cron (every 15m)  →  Upstash Redis  →  Next.js das
 ```
 
 The cron endpoint fans out fetches with concurrency 20, runs signal detection in-process, and writes a single `mpz:scan:latest` key to Redis. The dashboard polls `/api/signals` every 60s and reads that key.
+
+Signal history and outcomes are stored in Neon Postgres and pruned automatically after `SIGNAL_RETENTION_DAYS`.
 
 ## Honest expectations
 

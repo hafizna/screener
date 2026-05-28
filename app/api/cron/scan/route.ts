@@ -13,7 +13,7 @@ import type { FRBias, LsBias, MarketRegime, Signal, SignalType, ScanResult } fro
 import { analyzeBias } from "@/lib/bias";
 import { detectSignal } from "@/lib/signals";
 import { storeScanResult } from "@/lib/kv";
-import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, expireOldSignals } from "@/lib/db";
+import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, expireOldSignals, pruneOldSignals } from "@/lib/db";
 import { resolveOutcome } from "@/lib/outcomes";
 
 export const maxDuration = 60;
@@ -201,6 +201,7 @@ export async function GET(req: NextRequest) {
   //    Both are non-fatal — DB being down must not break the live scan.
   let dbSignalsInserted = 0;
   let dbOutcomesResolved = 0;
+  let dbSignalsPruned = 0;
   try {
     await ensureSchema();
 
@@ -237,6 +238,9 @@ export async function GET(req: NextRequest) {
         })
       );
     }
+
+    // 7d. Retention cleanup to keep DB storage bounded.
+    dbSignalsPruned = await pruneOldSignals();
   } catch (e) {
     console.error("DB write failed", e);
   }
@@ -250,6 +254,7 @@ export async function GET(req: NextRequest) {
     regime:         scanResult.regime,
     dbSignalsInserted,
     dbOutcomesResolved,
+    dbSignalsPruned,
   });
 }
 

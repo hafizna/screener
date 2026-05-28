@@ -1,6 +1,11 @@
 import { neon } from "@neondatabase/serverless";
 import type { Signal } from "./types";
 
+const SIGNAL_RETENTION_DAYS = Math.max(
+  1,
+  parseInt(process.env.SIGNAL_RETENTION_DAYS ?? "14", 10) || 14
+);
+
 // Lazily create the client so missing DATABASE_URL doesn't break the build.
 // All exported helpers return early (no-op) when DB is not configured.
 function getDb() {
@@ -193,6 +198,20 @@ export async function expireOldSignals() {
     SET outcome = 'expired', outcome_at = ${Date.now()}
     WHERE outcome = 'active' AND bar_time < ${cutoff}
   `;
+}
+
+// Keep Neon storage bounded. Active signals are already expired after 24h, so
+// deleting by bar_time is safe once the retention window has passed.
+export async function pruneOldSignals(): Promise<number> {
+  const sql = getDb();
+  if (!sql) return 0;
+  const cutoff = Date.now() - SIGNAL_RETENTION_DAYS * 24 * 60 * 60_000;
+  const rows = await sql`
+    DELETE FROM signal_log
+    WHERE bar_time < ${cutoff}
+    RETURNING id
+  ` as Array<{ id: string }>;
+  return rows.length;
 }
 
 // ─── Read path ────────────────────────────────────────────────────────────────
