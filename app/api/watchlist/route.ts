@@ -1,12 +1,12 @@
 import { NextResponse } from "next/server";
-import { getWatchedSignals } from "@/lib/db";
+import { getTrackedSignals } from "@/lib/db";
 import { fetchMarkPrices } from "@/lib/binance";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
   const [signals, prices] = await Promise.all([
-    getWatchedSignals(),
+    getTrackedSignals(),
     fetchMarkPrices().catch(() => new Map<string, number>()),
   ]);
 

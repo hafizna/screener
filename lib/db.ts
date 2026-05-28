@@ -241,7 +241,7 @@ export async function expireOldSignals() {
   `;
 }
 
-// Keep Neon storage bounded. Active signals are already expired after 24h, so
+// Keep Neon storage bounded. Active signals are already expired after 72h, so
 // deleting by bar_time is safe once the retention window has passed.
 export async function pruneOldSignals(): Promise<number> {
   const sql = getDb();
@@ -255,17 +255,24 @@ export async function pruneOldSignals(): Promise<number> {
   return rows.length;
 }
 
-// Returns all signals the user has bookmarked (watched=TRUE), including resolved ones.
-export async function getWatchedSignals(): Promise<SignalLog[]> {
+// Returns all signals that still need monitoring. Active signals are included
+// automatically; watched resolved signals remain visible as manual bookmarks.
+export async function getTrackedSignals(): Promise<SignalLog[]> {
   const sql = getDb();
   if (!sql) return [];
   const rows = await sql`
     SELECT * FROM signal_log
-    WHERE watched = TRUE
-    ORDER BY bar_time DESC
-    LIMIT 50
+    WHERE outcome = 'active' OR watched = TRUE
+    ORDER BY
+      CASE WHEN outcome = 'active' THEN 0 ELSE 1 END,
+      bar_time DESC
+    LIMIT 100
   ` as unknown[];
   return (rows as unknown[]).map(normalizeSignalLog);
+}
+
+export async function getWatchedSignals(): Promise<SignalLog[]> {
+  return getTrackedSignals();
 }
 
 // ─── Read path ────────────────────────────────────────────────────────────────
@@ -296,8 +303,18 @@ export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
   if (!sql) return empty;
 
   const [rows, counts] = await Promise.all([
-    sql`SELECT * FROM signal_log ORDER BY bar_time DESC LIMIT ${limit}` as Promise<unknown[]>,
-    sql`SELECT outcome, COUNT(*)::int AS n FROM signal_log GROUP BY outcome` as Promise<unknown[]>,
+    sql`
+      SELECT * FROM signal_log
+      WHERE outcome <> 'active'
+      ORDER BY COALESCE(outcome_at, bar_time) DESC
+      LIMIT ${limit}
+    ` as Promise<unknown[]>,
+    sql`
+      SELECT outcome, COUNT(*)::int AS n
+      FROM signal_log
+      WHERE outcome <> 'active'
+      GROUP BY outcome
+    ` as Promise<unknown[]>,
   ]);
 
   const cm = Object.fromEntries(
@@ -313,8 +330,8 @@ export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
   return {
     signals: rows.map(normalizeSignalLog),
     stats: {
-      total:   (cm["active"] ?? 0) + resolved,
-      active:  cm["active"] ?? 0,
+      total:   resolved,
+      active:  0,
       tp3, tp2, tp1, sl, expired: exp,
       tp3Rate: resolved ? Math.round(tp3 / resolved * 100) : 0,
       tp2Rate: resolved ? Math.round(tp2 / resolved * 100) : 0,

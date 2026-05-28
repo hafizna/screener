@@ -187,6 +187,7 @@ export async function GET(req: NextRequest) {
           bias1h,
           bias4h,
           regime,
+          atr1h,
           fr: frInfo?.lastFundingRate,
           oiChangePct,
           oiBias,
@@ -332,6 +333,7 @@ function enrichWatchCandidate(
     bias1h: Bias;
     bias4h: Bias;
     regime: MarketRegime;
+    atr1h: number;
     fr?: number;
     oiChangePct?: number;
     oiBias?: "rising" | "flat" | "falling";
@@ -343,6 +345,11 @@ function enrichWatchCandidate(
 ): WatchCandidate {
   const frBias = ctx.fr !== undefined ? classifyFR(watch.side, ctx.fr, ctx.regime) : undefined;
   const signalType = determineSignalType(watch.side, ctx.regime, ctx.lsBias, frBias);
+  const entryPrice = watch.barClose;
+  const tp1 = ctx.atr1h > 0 ? (watch.side === "long" ? entryPrice + 1.5 * ctx.atr1h : entryPrice - 1.5 * ctx.atr1h) : undefined;
+  const tp2 = ctx.atr1h > 0 ? (watch.side === "long" ? entryPrice + 3.0 * ctx.atr1h : entryPrice - 3.0 * ctx.atr1h) : undefined;
+  const tp3 = ctx.atr1h > 0 ? (watch.side === "long" ? entryPrice + 5.0 * ctx.atr1h : entryPrice - 5.0 * ctx.atr1h) : undefined;
+  const sl  = ctx.atr1h > 0 ? (watch.side === "long" ? entryPrice - 1.0 * ctx.atr1h : entryPrice + 1.0 * ctx.atr1h) : undefined;
   const squeezeScore = computeSqueezeScore(
     watch.side,
     ctx.fr,
@@ -395,6 +402,7 @@ function enrichWatchCandidate(
     bias4h: ctx.bias4h.bias,
     biasScore1h: ctx.bias1h.score,
     biasScore4h: ctx.bias4h.score,
+    ...(ctx.atr1h > 0 ? { atr1h: ctx.atr1h, entryPrice, tp1, tp2, tp3, sl } : { entryPrice }),
     ...(ctx.fr !== undefined ? { fundingRate: ctx.fr, frBias } : {}),
     ...(ctx.oiChangePct !== undefined ? { oiChangePct: ctx.oiChangePct, oiBias: ctx.oiBias } : {}),
     ...(ctx.longShortRatio !== undefined ? { longShortRatio: ctx.longShortRatio, lsBias: ctx.lsBias } : {}),

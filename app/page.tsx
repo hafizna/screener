@@ -22,6 +22,8 @@ type SortDir = "asc" | "desc";
 type WatchSortKey = "score" | "symbol" | "window" | "side" | "z" | "squeeze" | "time";
 type HistoryFilter = Outcome | "all";
 type HistoryConfidenceFilter = "all" | "high" | "medium" | "low";
+type MainTab = "radar" | "entry" | "tracked" | "history";
+type EntrySourceFilter = "all" | "radar";
 
 // Confluence score: each of the 6 factors contributes ±1.
 // Range: −6 (everything opposed) to +6 (everything aligned).
@@ -40,7 +42,7 @@ function confluenceScore(s: Signal): number {
 }
 
 export default function DashboardPage() {
-  const [tab, setTab] = useState<"live" | "watchlist" | "history">("live");
+  const [tab, setTab] = useState<MainTab>("radar");
 
   // ── Live tab state ──────────────────────────────────────────────────────────
   const [data, setData] = useState<ApiResponse | null>(null);
@@ -52,12 +54,12 @@ export default function DashboardPage() {
   const [histLoading, setHistLoading] = useState(false);
   const [histErr, setHistErr] = useState<string | null>(null);
 
-  // ── Watchlist (tracked signals from DB) ──────────────────────────────────────
+  // ── Tracked signals from DB ─────────────────────────────────────────────────
   type TrackedSignal = SignalLog & { current_price: number | null };
   const [trackedSignals, setTrackedSignals] = useState<TrackedSignal[] | null>(null);
   const [trackedLoading, setTrackedLoading] = useState(false);
 
-  // Watchlist — persisted in localStorage so it survives page refresh
+  // Starred ids are persisted in localStorage so the button state survives refresh.
   const [watched, setWatched] = useState<Set<string>>(() => {
     if (typeof window === "undefined") return new Set();
     try { return new Set(JSON.parse(localStorage.getItem("watched") ?? "[]") as string[]); }
@@ -129,9 +131,9 @@ export default function DashboardPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
-  // Load tracked signals from DB when user switches to Watchlist tab
+  // Load active/starred signals from DB when user switches to Tracked tab
   useEffect(() => {
-    if (tab === "watchlist") loadTrackedSignals();
+    if (tab === "tracked") loadTrackedSignals();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -167,16 +169,15 @@ export default function DashboardPage() {
     return data.watchlist ?? [];
   }, [data]);
 
-  // Entry tab: default to watchlist-sourced signals only; fall back to all if none.
-  const [showAllSignals, setShowAllSignals] = useState(false);
+  const [entrySourceFilter, setEntrySourceFilter] = useState<EntrySourceFilter>("all");
 
-  const watchlistSignals = useMemo(() =>
+  const radarSignals = useMemo(() =>
     activeSignals.filter((s) => s.fromWatchlist),
   [activeSignals]);
 
   const signalPool = useMemo(() =>
-    showAllSignals || watchlistSignals.length === 0 ? activeSignals : watchlistSignals,
-  [activeSignals, watchlistSignals, showAllSignals]);
+    entrySourceFilter === "radar" ? radarSignals : activeSignals,
+  [activeSignals, radarSignals, entrySourceFilter]);
 
   const filtered = useMemo<Signal[]>(() => {
     if (signalPool.length === 0) return [];
@@ -212,16 +213,22 @@ export default function DashboardPage() {
           </button>
           <div className="flex rounded-md border border-neutral-700 overflow-hidden text-sm">
             <button
-              onClick={() => setTab("live")}
-              className={`px-3 py-1.5 transition-colors ${tab === "live" ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-200"}`}
+              onClick={() => setTab("radar")}
+              className={`px-3 py-1.5 transition-colors ${tab === "radar" ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-200"}`}
+            >
+              Radar
+            </button>
+            <button
+              onClick={() => setTab("entry")}
+              className={`px-3 py-1.5 transition-colors border-l border-neutral-700 ${tab === "entry" ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-200"}`}
             >
               Entry
             </button>
             <button
-              onClick={() => setTab("watchlist")}
-              className={`px-3 py-1.5 transition-colors border-l border-neutral-700 ${tab === "watchlist" ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-200"}`}
+              onClick={() => setTab("tracked")}
+              className={`px-3 py-1.5 transition-colors border-l border-neutral-700 ${tab === "tracked" ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-200"}`}
             >
-              Watchlist
+              Tracked
             </button>
             <button
               onClick={() => setTab("history")}
@@ -230,12 +237,20 @@ export default function DashboardPage() {
               History
             </button>
           </div>
-          {tab !== "history" && (
+          {(tab === "radar" || tab === "entry") && (
             <button
               onClick={refresh}
               className="px-3 py-1.5 text-sm rounded-md border border-neutral-700 hover:border-neutral-500 transition-colors"
             >
               {loading ? "Refreshing…" : "Refresh"}
+            </button>
+          )}
+          {tab === "tracked" && (
+            <button
+              onClick={loadTrackedSignals}
+              className="px-3 py-1.5 text-sm rounded-md border border-neutral-700 hover:border-neutral-500 transition-colors"
+            >
+              {trackedLoading ? "Loading…" : "Reload"}
             </button>
           )}
           {tab === "history" && (
@@ -266,7 +281,7 @@ export default function DashboardPage() {
           >
             Last scan: {new Date(data.scannedAt).toLocaleString()} ·{" "}
             {data.symbolsScanned} symbols · {activeSignals.length} active signals
-            {watchlist.length > 0 && ` · ${watchlist.length} watchlist`}
+            {watchlist.length > 0 && ` · ${watchlist.length} radar candidates`}
             {expiredCount > 0 && ` · ${expiredCount} expired hidden`}
             {data.stale && " · stale, check cron"}
             {data.symbolsErrored.length > 0 && ` · ${data.symbolsErrored.length} errors`}
@@ -286,17 +301,29 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {tab === "watchlist" && (
+      {tab === "radar" && (
         <WatchlistTab
+          mode="radar"
           candidates={watchlist}
           loading={loading}
+          tracked={null}
+          trackedLoading={false}
+          onReloadTracked={loadTrackedSignals}
+        />
+      )}
+
+      {tab === "tracked" && (
+        <WatchlistTab
+          mode="tracked"
+          candidates={[]}
+          loading={false}
           tracked={trackedSignals}
           trackedLoading={trackedLoading}
           onReloadTracked={loadTrackedSignals}
         />
       )}
 
-      {tab === "live" && (<>
+      {tab === "entry" && (<>
       <section className="mb-4 flex flex-wrap gap-2 items-center">
         <FilterGroup label="Timeframe">
           {(["15m", "1h"] as Timeframe[]).map((tf) => (
@@ -343,24 +370,23 @@ export default function DashboardPage() {
         </FilterGroup>
         <div className="ml-auto flex items-center gap-3 text-sm text-neutral-400">
           {filtered.length} signal{filtered.length === 1 ? "" : "s"}
-          {/* Watchlist / All toggle */}
-          {watchlistSignals.length > 0 && (
+          {radarSignals.length > 0 && (
             <button
-              onClick={() => setShowAllSignals((v) => !v)}
+              onClick={() => setEntrySourceFilter((v) => v === "all" ? "radar" : "all")}
               className={`px-2 py-0.5 rounded text-xs border transition-colors ${
-                !showAllSignals
+                entrySourceFilter === "radar"
                   ? "bg-amber-950/60 text-amber-300 border-amber-800/60"
                   : "text-neutral-500 border-neutral-700 hover:text-neutral-300"
               }`}
-              title={showAllSignals ? "Showing all signals" : "Showing watchlist-sourced signals only"}
+              title={entrySourceFilter === "radar" ? "Showing radar-sourced fired signals" : "Showing all fired signals"}
             >
-              {!showAllSignals
-                ? `From watchlist (${watchlistSignals.length})`
-                : `All (${activeSignals.length}) · ${watchlistSignals.length} from watchlist`}
+              {entrySourceFilter === "radar"
+                ? `Radar-sourced (${radarSignals.length})`
+                : `All (${activeSignals.length}) · ${radarSignals.length} from radar`}
             </button>
           )}
-          {watchlistSignals.length === 0 && activeSignals.length > 0 && (
-            <span className="text-xs text-neutral-600">no watchlist hits yet</span>
+          {radarSignals.length === 0 && activeSignals.length > 0 && (
+            <span className="text-xs text-neutral-600">no radar-sourced hits yet</span>
           )}
         </div>
       </section>
@@ -416,12 +442,14 @@ function TradeLifecycleBadge({ signal, currentPrice }: { signal: SignalLog; curr
 }
 
 function WatchlistTab({
+  mode,
   candidates,
   loading,
   tracked,
   trackedLoading,
   onReloadTracked,
 }: {
+  mode: "radar" | "tracked";
   candidates: WatchCandidate[];
   loading: boolean;
   tracked: (SignalLog & { current_price: number | null })[] | null;
@@ -480,11 +508,11 @@ function WatchlistTab({
   return (
     <div className="space-y-6">
       {/* ── My Tracked Signals (from DB) ──────────────────────────────────── */}
-      {(tracked !== null || trackedLoading) && (
+      {mode === "tracked" && (
         <section>
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-sm font-medium text-neutral-300">
-              My Tracked Signals
+              Active / Starred Signals
               {tracked && ` · ${tracked.length} total`}
             </h2>
             <button
@@ -499,9 +527,13 @@ function WatchlistTab({
             <div className="text-neutral-600 text-sm py-4 text-center">Loading…</div>
           )}
 
+          {!trackedLoading && tracked === null && (
+            <div className="text-neutral-600 text-sm py-4 text-center">No tracked data loaded yet.</div>
+          )}
+
           {tracked !== null && tracked.length === 0 && (
             <div className="rounded-md border border-neutral-800 bg-neutral-900/20 p-6 text-center text-neutral-600 text-sm">
-              No tracked signals yet. Star a signal on the Entry tab to track it.
+              No active or starred signals yet. New entries will show here automatically.
             </div>
           )}
 
@@ -576,9 +608,9 @@ function WatchlistTab({
       )}
 
       {/* ── Near Setups (auto-detected from current scan) ─────────────────── */}
-      <section>
+      {mode === "radar" && <section>
         <h2 className="text-sm font-medium text-neutral-300 mb-2">
-          Near Setups
+          Radar Candidates
           {candidates.length > 0 && ` · ${candidates.length} detected`}
         </h2>
         {loading && (
@@ -586,13 +618,13 @@ function WatchlistTab({
         )}
         {!loading && candidates.length === 0 && (
           <div className="rounded-md border border-neutral-800 bg-neutral-900/20 p-6 text-center text-neutral-600 text-sm">
-            No near setups in the latest scan.
+            No radar candidates in the latest scan.
           </div>
         )}
         {!loading && candidates.length > 0 && (
           <div className="rounded-md border border-neutral-800 overflow-hidden">
             <div className="overflow-x-auto">
-              <table className="w-full text-sm min-w-[1180px]">
+              <table className="w-full text-sm min-w-[1380px]">
                 <thead className="bg-neutral-900 text-neutral-400 text-left">
                   <tr>
                     <th className="px-3 py-2 font-normal"><button onClick={() => setSort("score")}>{sortLabel("Score", "score")}</button></th>
@@ -603,7 +635,11 @@ function WatchlistTab({
                     <th className="px-3 py-2 font-normal">HTF bias</th>
                     <th className="px-3 py-2 font-normal"><button onClick={() => setSort("z")}>{sortLabel("Z", "z")}</button></th>
                     <th className="px-3 py-2 font-normal text-right">Level</th>
-                    <th className="px-3 py-2 font-normal text-right">Close</th>
+                    <th className="px-3 py-2 font-normal text-right">Entry</th>
+                    <th className="px-3 py-2 font-normal text-right">SL</th>
+                    <th className="px-3 py-2 font-normal text-right">TP1</th>
+                    <th className="px-3 py-2 font-normal text-right">TP2</th>
+                    <th className="px-3 py-2 font-normal text-right text-cyan-500">TP3</th>
                     <th className="px-3 py-2 font-normal text-right">FR</th>
                     <th className="px-3 py-2 font-normal text-right">L/S</th>
                     <th className="px-3 py-2 font-normal text-right">OI</th>
@@ -632,7 +668,11 @@ function WatchlistTab({
                         <span className="text-neutral-300">{row.triggerLevel}</span>{" "}
                         <span className="text-neutral-500">{formatPrice(row.triggerPrice)}</span>
                       </td>
-                      <td className="px-3 py-2 text-right tabular-nums">{formatPrice(row.barClose)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-neutral-300">{formatPrice(row.entryPrice ?? row.barClose)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-red-400 text-xs">{row.sl !== undefined ? formatPrice(row.sl) : "—"}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-emerald-300 text-xs">{row.tp1 !== undefined ? formatPrice(row.tp1) : "—"}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-emerald-400 text-xs">{row.tp2 !== undefined ? formatPrice(row.tp2) : "—"}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-cyan-600 text-xs">{row.tp3 !== undefined ? formatPrice(row.tp3) : "—"}</td>
                       <td className="px-3 py-2 text-right">
                         {row.fundingRate !== undefined ? <FRBadge rate={row.fundingRate} bias={row.frBias} /> : <span className="text-neutral-600">-</span>}
                       </td>
@@ -666,7 +706,7 @@ function WatchlistTab({
             </div>
           </div>
         )}
-      </section>
+      </section>}
     </div>
   );
 }
@@ -696,7 +736,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
   if (!history) return null;
 
   const { signals, stats } = history;
-  const resolved = stats.tp2 + stats.tp1 + stats.sl + stats.expired;
+  const resolved = stats.tp3 + stats.tp2 + stats.tp1 + stats.sl + stats.expired;
   const filteredSignals = signals.filter((row) => {
     if (outcomeFilter !== "all" && row.outcome !== outcomeFilter) return false;
     if (confidenceFilter !== "all" && historyConfidenceBucket(row) !== confidenceFilter) return false;
@@ -710,8 +750,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
     <div>
       {/* Stats bar */}
       <div className="mb-4 flex flex-wrap gap-3 text-sm">
-        <StatPill label="Total tracked" value={stats.total.toString()} active={outcomeFilter === "all"} onClick={() => setOutcomeFilter("all")} />
-        <StatPill label="Active" value={stats.active.toString()} color="text-blue-300" active={outcomeFilter === "active"} onClick={() => setOutcomeFilter("active")} />
+        <StatPill label="Resolved" value={stats.total.toString()} active={outcomeFilter === "all"} onClick={() => setOutcomeFilter("all")} />
         <StatPill label="TP3 swing" value={`${stats.tp3} (${stats.tp3Rate}%)`} color="text-cyan-400" active={outcomeFilter === "tp3"} onClick={() => setOutcomeFilter("tp3")} />
         <StatPill label="TP2" value={`${stats.tp2} (${stats.tp2Rate}%)`} color="text-emerald-400" active={outcomeFilter === "tp2"} onClick={() => setOutcomeFilter("tp2")} />
         <StatPill label="TP1" value={`${stats.tp1} (${stats.tp1Rate}%)`} color="text-emerald-300" active={outcomeFilter === "tp1"} onClick={() => setOutcomeFilter("tp1")} />
@@ -743,7 +782,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
 
       {filteredSignals.length === 0 ? (
         <div className="rounded-md border border-neutral-800 bg-neutral-900/40 p-8 text-center text-neutral-500 text-sm">
-          No signals tracked yet — history builds up after the next cron scan.
+          No resolved signals yet. Active signals live in Tracked until TP/SL/expiry.
         </div>
       ) : (
         <div className="rounded-md border border-neutral-800 overflow-hidden">
@@ -782,7 +821,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
                       </td>
                       <td className="px-3 py-2 font-medium">
                         {row.symbol}
-                        {row.watched && <span className="ml-1 text-amber-300 text-xs" title="Watchlisted">★</span>}
+                        {row.watched && <span className="ml-1 text-amber-300 text-xs" title="Starred">★</span>}
                       </td>
                       <td className={`px-3 py-2 ${row.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>
                         {row.side}
@@ -871,7 +910,7 @@ function historyPerformanceRows(
 
   return Array.from(grouped.entries()).map(([label, group]) => {
     const resolved = group.filter((row) => row.outcome !== "active");
-    const wins = resolved.filter((row) => row.outcome === "tp1" || row.outcome === "tp2").length;
+    const wins = resolved.filter((row) => row.outcome === "tp1" || row.outcome === "tp2" || row.outcome === "tp3").length;
     const losses = resolved.filter((row) => row.outcome === "sl").length;
     const mfeVals = resolved
       .filter((row) => row.max_favorable !== null && row.entry_price)
@@ -1063,7 +1102,7 @@ function SignalTable({ signals, regime, watched, onWatch }: {
               <td className="px-3 py-2">
                 <span className="font-medium">{s.symbol}</span>
                 {s.fromWatchlist && (
-                  <span className="ml-1.5 text-xs text-amber-400/70" title="This setup was on your watchlist before firing">★</span>
+                  <span className="ml-1.5 text-xs text-amber-400/70" title="This setup was on Radar before firing">★</span>
                 )}
               </td>
               <td className="px-3 py-2"><SignalTypeBadge type={s.signalType} /></td>
@@ -1368,7 +1407,7 @@ function WatchButton({ id, isWatched, onWatch }: {
 }) {
   const [picking, setPicking] = useState(false);
   if (isWatched) {
-    return <span className="ml-2 text-xs text-amber-300" title="Signal added to watchlist">★</span>;
+    return <span className="ml-2 text-xs text-amber-300" title="Signal added to Tracked">★</span>;
   }
   if (picking) {
     return (
@@ -1390,7 +1429,7 @@ function WatchButton({ id, isWatched, onWatch }: {
     <button
       onClick={() => setPicking(true)}
       className="ml-2 text-xs text-neutral-600 hover:text-amber-300 transition-colors"
-      title="Add to watchlist"
+      title="Add to Tracked"
     >
       ☆
     </button>
@@ -1483,18 +1522,19 @@ function GuideModal({ onClose }: { onClose: () => void }) {
           {/* Flow overview */}
           <section>
             <h3 className="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-3">Signal flow</h3>
-            <div className="flex items-start gap-3">
-              {(["Entry", "Watchlist", "History"] as const).map((tab, i) => (
+            <div className="grid gap-3 sm:grid-cols-4">
+              {(["Radar", "Entry", "Tracked", "History"] as const).map((tab, i) => (
                 <div key={tab} className="flex-1">
                   <div className="flex items-center gap-2 mb-1">
                     <span className="text-xs text-neutral-600">{i + 1}</span>
                     <span className="font-medium text-neutral-200">{tab}</span>
-                    {i < 2 && <span className="text-neutral-700 text-xs">→</span>}
+                    {i < 3 && <span className="text-neutral-700 text-xs">→</span>}
                   </div>
                   <p className="text-xs text-neutral-500">
-                    {tab === "Entry" && "Signals that fired from setups already on your Watchlist. Defaults to watchlist-sourced only — toggle to see all. Z-score spike at a Market Profile level."}
-                    {tab === "Watchlist" && "Your starred signals with live lifecycle status, plus near-setup candidates auto-detected by the scanner. Watch a setup here — when it fires, it appears in Entry."}
-                    {tab === "History" && "All resolved signals: TP1/TP2/TP3 hit or stopped out. Stats auto-update every 15m via cron."}
+                    {tab === "Radar" && "Pre-entry candidates near Market Profile levels. They show a provisional ATR trade plan before a z-score entry fires."}
+                    {tab === "Entry" && "Signals that already fired. Defaults to all active signals, with a Radar-sourced filter for candidates that were seen before firing."}
+                    {tab === "Tracked" && "All active signals are monitored here automatically. Starred signals remain visible as manual bookmarks."}
+                    {tab === "History" && "Resolved signals only: TP1/TP2/TP3, SL, or expiry. Win-rate stats do not include active trades."}
                   </p>
                 </div>
               ))}
@@ -1503,7 +1543,7 @@ function GuideModal({ onClose }: { onClose: () => void }) {
 
           {/* Lifecycle states */}
           <section>
-            <h3 className="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-3">Trade lifecycle (Watchlist)</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-3">Trade lifecycle (Tracked)</h3>
             <div className="space-y-2">
               {[
                 { badge: "Waiting", cls: "bg-neutral-900 text-neutral-400 border-neutral-700", desc: "Signal is active, price hasn't reached any TP yet." },

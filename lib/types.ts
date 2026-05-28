@@ -128,6 +128,12 @@ export interface WatchCandidate {
   barTime: number;
   barClose: number;
   distanceFromLevel: number;
+  atr1h?: number;
+  entryPrice?: number;
+  tp1?: number;
+  tp2?: number;
+  tp3?: number;
+  sl?: number;
   fundingRate?: number;
   frBias?: FRBias;
   oiChangePct?: number;
