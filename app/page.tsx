@@ -179,14 +179,25 @@ export default function DashboardPage() {
     });
   }, [activeSignals, tfFilter, sideFilter, minZ, frFilter, minScore, typeFilter]);
 
+  // ── Guide modal ─────────────────────────────────────────────────────────────
+  const [showGuide, setShowGuide] = useState(false);
+
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100 px-3 py-4 sm:px-6 sm:py-6">
+      {showGuide && <GuideModal onClose={() => setShowGuide(false)} />}
       <header className="mb-5 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-medium">MP + Z screener</h1>
           <p className="text-sm text-neutral-400">Binance USDT-M futures · top by volume</p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowGuide(true)}
+            className="px-2 py-1.5 text-sm rounded-md border border-neutral-700 hover:border-neutral-500 text-neutral-400 hover:text-neutral-200 transition-colors"
+            title="How to use this app"
+          >
+            ?
+          </button>
           <div className="flex rounded-md border border-neutral-700 overflow-hidden text-sm">
             <button
               onClick={() => setTab("live")}
@@ -1393,4 +1404,112 @@ function formatRemaining(ms: number): string {
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   if (hours > 0) return `${hours}h ${minutes}m`;
   return `${minutes}m`;
+}
+
+// ─── Guide Modal ──────────────────────────────────────────────────────────────
+
+function GuideModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/70 p-4 overflow-y-auto" onClick={onClose}>
+      <div
+        className="relative mt-8 mb-8 w-full max-w-2xl rounded-lg border border-neutral-700 bg-neutral-900 text-sm text-neutral-300 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-neutral-800 px-5 py-4">
+          <h2 className="text-base font-medium text-neutral-100">How to use this screener</h2>
+          <button onClick={onClose} className="text-neutral-500 hover:text-neutral-200 text-lg leading-none">✕</button>
+        </div>
+
+        <div className="px-5 py-5 space-y-6">
+
+          {/* Flow overview */}
+          <section>
+            <h3 className="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-3">Signal flow</h3>
+            <div className="flex items-start gap-3">
+              {(["Entry", "Watchlist", "History"] as const).map((tab, i) => (
+                <div key={tab} className="flex-1">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs text-neutral-600">{i + 1}</span>
+                    <span className="font-medium text-neutral-200">{tab}</span>
+                    {i < 2 && <span className="text-neutral-700 text-xs">→</span>}
+                  </div>
+                  <p className="text-xs text-neutral-500">
+                    {tab === "Entry" && "New signals from the latest scan. Z-score volume spike on a Market Profile level. Star (★) a signal to track it."}
+                    {tab === "Watchlist" && "Your starred signals with live lifecycle status, plus near-setup candidates auto-detected by the scanner."}
+                    {tab === "History" && "All resolved signals: TP1/TP2/TP3 hit or stopped out. Stats auto-update every 15m via cron."}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Lifecycle states */}
+          <section>
+            <h3 className="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-3">Trade lifecycle (Watchlist)</h3>
+            <div className="space-y-2">
+              {[
+                { badge: "Waiting", cls: "bg-neutral-900 text-neutral-400 border-neutral-700", desc: "Signal is active, price hasn't reached any TP yet." },
+                { badge: "TP1 ✓ Running →TP2", cls: "bg-emerald-900 text-emerald-300 border-emerald-700", desc: "TP1 hit. SL assumed moved to break-even. Still tracking toward TP2." },
+                { badge: "TP2 ✓ Running →TP3", cls: "bg-emerald-600 text-white border-emerald-500", desc: "TP2 hit. Partial profit locked. Tracking TP3 swing target (5× ATR)." },
+                { badge: "TP3 ✓", cls: "bg-emerald-400 text-neutral-900 border-emerald-300", desc: "Full swing target hit. Trade done." },
+                { badge: "SL ✗", cls: "bg-red-950 text-red-400 border-red-800", desc: "Stopped out. If SL hit after TP1 was already hit, outcome is TP1 (break-even)." },
+              ].map((row) => (
+                <div key={row.badge} className="flex items-center gap-3">
+                  <span className={`shrink-0 inline-flex px-1.5 py-0.5 text-xs rounded border ${row.cls}`}>{row.badge}</span>
+                  <span className="text-xs text-neutral-500">{row.desc}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Targets */}
+          <section>
+            <h3 className="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-3">ATR-based targets (1H, 14-period)</h3>
+            <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs">
+              <div><span className="text-neutral-400 w-10 inline-block">SL</span><span className="text-neutral-500">entry ∓ 1× ATR — stop loss</span></div>
+              <div><span className="text-neutral-400 w-10 inline-block">TP1</span><span className="text-neutral-500">entry ± 1.5× ATR — quick target</span></div>
+              <div><span className="text-neutral-400 w-10 inline-block">TP2</span><span className="text-neutral-500">entry ± 3× ATR — mid target</span></div>
+              <div><span className="text-cyan-600 w-10 inline-block">TP3</span><span className="text-neutral-500">entry ± 5× ATR — swing target (3-5d)</span></div>
+            </div>
+          </section>
+
+          {/* Regime */}
+          <section>
+            <h3 className="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-3">Market regime (BTC 4H)</h3>
+            <div className="space-y-1 text-xs">
+              <div><span className="text-red-400 w-20 inline-block">FLUSH</span><span className="text-neutral-500">BTC dumped ≥2% from 12h high → look for long bounces at MP support. Filters auto-switch to Long / Bounce / Score≥2.</span></div>
+              <div><span className="text-emerald-400 w-20 inline-block">BREAKOUT</span><span className="text-neutral-500">BTC pumped ≥2% open→close → look for continuation longs. Filters auto-switch to Long / Continuation.</span></div>
+              <div><span className="text-neutral-400 w-20 inline-block">NEUTRAL</span><span className="text-neutral-500">No strong directional bias. All signal types visible.</span></div>
+            </div>
+          </section>
+
+          {/* Confluence score */}
+          <section>
+            <h3 className="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-3">Confluence / Squeeze score (0–6)</h3>
+            <p className="text-xs text-neutral-500 mb-2">Higher = more factors aligning for a squeeze/bounce. Each factor contributes 0–2 points:</p>
+            <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 text-xs text-neutral-500">
+              <div>L/S positioning (crowded shorts = +2)</div>
+              <div>Funding rate magnitude (high FR = +2)</div>
+              <div>OI rising (new money entering = +1)</div>
+              <div>Relative strength vs BTC (+1)</div>
+            </div>
+          </section>
+
+          {/* Z badge */}
+          <section>
+            <h3 className="text-xs font-semibold uppercase tracking-widest text-neutral-500 mb-3">Volume Z-score</h3>
+            <div className="flex gap-4 text-xs">
+              <div><span className="inline-block px-1.5 py-0.5 rounded border bg-neutral-900 text-neutral-400 border-neutral-800 mr-1.5">— 2.0</span>Normal spike</div>
+              <div><span className="inline-block px-1.5 py-0.5 rounded border bg-blue-950 text-blue-300 border-blue-900 mr-1.5">LG 3.5</span>Large spike</div>
+              <div><span className="inline-block px-1.5 py-0.5 rounded border bg-emerald-950 text-emerald-300 border-emerald-900 mr-1.5">EX 5.2</span>Extreme spike — highest conviction</div>
+            </div>
+          </section>
+
+          <p className="text-xs text-neutral-600 border-t border-neutral-800 pt-4">
+            Scans run every 15 minutes via Vercel cron. Signals expire after 72h (unwatched) or your custom hold window (watched). Data is Binance USDT-M futures only.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
 }
