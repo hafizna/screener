@@ -12,7 +12,7 @@ import { computeATR, computeRS, computeSqueezeScore } from "@/lib/atr";
 import type { BiasWindow, FRBias, LsBias, MarketRegime, Signal, SignalType, ScanResult, WatchCandidate } from "@/lib/types";
 import { analyzeBias } from "@/lib/bias";
 import { detectRecentSignals, detectWatchCandidate } from "@/lib/signals";
-import { storeScanResult } from "@/lib/kv";
+import { storeScanResult, loadLatestScan } from "@/lib/kv";
 import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, updateBestTP, expireOldSignals, pruneOldSignals } from "@/lib/db";
 import { resolveOutcome } from "@/lib/outcomes";
 
@@ -67,6 +67,14 @@ export async function GET(req: NextRequest) {
     : { regime: "neutral" as const, btcMomentum12h: 0, btcFR: 0, summary: "BTC data unavailable" };
 
   const regime = regimeResult.regime;
+
+  // 3b. Load previous scan's watchlist — used to tag "fromWatchlist" on new signals.
+  //     A signal is "from watchlist" if its symbol+side was a WatchCandidate last scan,
+  //     meaning the setup was already on radar before the z-score fired.
+  const prevScan = await loadLatestScan().catch(() => null);
+  const prevWatchedKeys = new Set(
+    (prevScan?.watchlist ?? []).map((w) => `${w.symbol}-${w.side}`)
+  );
 
   // 4. Main scan loop — 15m signal detection, then HTF enrichment only if triggered.
   const results = await withConcurrency(symbols, CONCURRENCY, async (symbol) => {
@@ -150,6 +158,13 @@ export async function GET(req: NextRequest) {
           relativeStrength,
         );
 
+        // fromWatchlist: was this symbol+side on the radar BEFORE this z-score fired?
+        // Checked against: previous scan's watchlist (cross-scan) OR current scan's
+        // own watch candidate (same-scan near_trigger → signal).
+        const fromWatchlist =
+          prevWatchedKeys.has(`${signal.symbol}-${signal.side}`) ||
+          (watchSeed != null && watchSeed.side === signal.side && watchSeed.state === "near_trigger");
+
         return {
           ...signal,
           bias1h:      bias1h.bias,
@@ -163,6 +178,7 @@ export async function GET(req: NextRequest) {
           ...(atr1h > 0 ? { atr1h, tp1, tp2, tp3, sl } : {}),
           ...(relativeStrength !== undefined ? { relativeStrength, rsBias } : {}),
           squeezeScore,
+          fromWatchlist,
         };
       });
 

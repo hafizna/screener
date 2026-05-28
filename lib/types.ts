@@ -103,6 +103,9 @@ export interface Signal {
   rsBias?: "strong" | "neutral" | "weak";
   // Bounce quality composite (0–6)
   squeezeScore?: number;
+  // True if symbol+side was a WatchCandidate in the previous scan —
+  // i.e. the setup was already on radar before the z-score fired.
+  fromWatchlist?: boolean;
 }
 
 export interface WatchCandidate {

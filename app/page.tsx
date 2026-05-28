@@ -167,9 +167,20 @@ export default function DashboardPage() {
     return data.watchlist ?? [];
   }, [data]);
 
+  // Entry tab: default to watchlist-sourced signals only; fall back to all if none.
+  const [showAllSignals, setShowAllSignals] = useState(false);
+
+  const watchlistSignals = useMemo(() =>
+    activeSignals.filter((s) => s.fromWatchlist),
+  [activeSignals]);
+
+  const signalPool = useMemo(() =>
+    showAllSignals || watchlistSignals.length === 0 ? activeSignals : watchlistSignals,
+  [activeSignals, watchlistSignals, showAllSignals]);
+
   const filtered = useMemo<Signal[]>(() => {
-    if (activeSignals.length === 0) return [];
-    return activeSignals.filter((s) => {
+    if (signalPool.length === 0) return [];
+    return signalPool.filter((s) => {
       if (!tfFilter.has(s.timeframe)) return false;
       if (sideFilter !== "all" && s.side !== sideFilter) return false;
       if (s.zLevel < minZ) return false;
@@ -178,7 +189,7 @@ export default function DashboardPage() {
       if (typeFilter !== "all" && s.signalType !== typeFilter) return false;
       return true;
     });
-  }, [activeSignals, tfFilter, sideFilter, minZ, frFilter, minScore, typeFilter]);
+  }, [signalPool, tfFilter, sideFilter, minZ, frFilter, minScore, typeFilter]);
 
   // ── Guide modal ─────────────────────────────────────────────────────────────
   const [showGuide, setShowGuide] = useState(false);
@@ -330,8 +341,27 @@ export default function DashboardPage() {
           <Chip active={typeFilter === "bounce"}       onClick={() => setTypeFilter("bounce")}>Bounce</Chip>
           <Chip active={typeFilter === "continuation"} onClick={() => setTypeFilter("continuation")}>Cont.</Chip>
         </FilterGroup>
-        <div className="ml-auto text-sm text-neutral-400">
+        <div className="ml-auto flex items-center gap-3 text-sm text-neutral-400">
           {filtered.length} signal{filtered.length === 1 ? "" : "s"}
+          {/* Watchlist / All toggle */}
+          {watchlistSignals.length > 0 && (
+            <button
+              onClick={() => setShowAllSignals((v) => !v)}
+              className={`px-2 py-0.5 rounded text-xs border transition-colors ${
+                !showAllSignals
+                  ? "bg-amber-950/60 text-amber-300 border-amber-800/60"
+                  : "text-neutral-500 border-neutral-700 hover:text-neutral-300"
+              }`}
+              title={showAllSignals ? "Showing all signals" : "Showing watchlist-sourced signals only"}
+            >
+              {!showAllSignals
+                ? `From watchlist (${watchlistSignals.length})`
+                : `All (${activeSignals.length}) · ${watchlistSignals.length} from watchlist`}
+            </button>
+          )}
+          {watchlistSignals.length === 0 && activeSignals.length > 0 && (
+            <span className="text-xs text-neutral-600">no watchlist hits yet</span>
+          )}
         </div>
       </section>
 
@@ -1025,12 +1055,17 @@ function SignalTable({ signals, regime, watched, onWatch }: {
           {signals.map((s, i) => (
             <tr
               key={`${s.symbol}-${s.timeframe}-${s.barTime}-${i}`}
-              className="border-t border-neutral-800 hover:bg-neutral-900/40"
+              className={`border-t border-neutral-800 hover:bg-neutral-900/40 ${s.fromWatchlist ? "bg-amber-950/10" : ""}`}
             >
               <td className="px-3 py-2">
                 <ScoreBadge score={confluenceScore(s)} />
               </td>
-              <td className="px-3 py-2 font-medium">{s.symbol}</td>
+              <td className="px-3 py-2">
+                <span className="font-medium">{s.symbol}</span>
+                {s.fromWatchlist && (
+                  <span className="ml-1.5 text-xs text-amber-400/70" title="This setup was on your watchlist before firing">★</span>
+                )}
+              </td>
               <td className="px-3 py-2"><SignalTypeBadge type={s.signalType} /></td>
               <td className="px-3 py-2 text-neutral-400">{s.timeframe}</td>
               <td className={`px-3 py-2 ${s.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>
@@ -1457,8 +1492,8 @@ function GuideModal({ onClose }: { onClose: () => void }) {
                     {i < 2 && <span className="text-neutral-700 text-xs">→</span>}
                   </div>
                   <p className="text-xs text-neutral-500">
-                    {tab === "Entry" && "New signals from the latest scan. Z-score volume spike on a Market Profile level. Star (★) a signal to track it."}
-                    {tab === "Watchlist" && "Your starred signals with live lifecycle status, plus near-setup candidates auto-detected by the scanner."}
+                    {tab === "Entry" && "Signals that fired from setups already on your Watchlist. Defaults to watchlist-sourced only — toggle to see all. Z-score spike at a Market Profile level."}
+                    {tab === "Watchlist" && "Your starred signals with live lifecycle status, plus near-setup candidates auto-detected by the scanner. Watch a setup here — when it fires, it appears in Entry."}
                     {tab === "History" && "All resolved signals: TP1/TP2/TP3 hit or stopped out. Stats auto-update every 15m via cron."}
                   </p>
                 </div>
