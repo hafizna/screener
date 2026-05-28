@@ -23,6 +23,8 @@ export type MarketRegime = "flush" | "neutral" | "breakout";
 // What kind of setup the signal represents given the current regime.
 export type SignalType = "bounce" | "continuation" | "standard";
 
+export type WatchState = "watch" | "near_trigger";
+
 export interface Kline {
   openTime: number;   // ms
   open: number;
@@ -101,6 +103,37 @@ export interface Signal {
   squeezeScore?: number;
 }
 
+export interface WatchCandidate {
+  symbol: string;
+  timeframe: Timeframe;
+  side: SignalSide;
+  state: WatchState;
+  score: number;
+  reasons: string[];
+  missing: string[];
+  zLevel: ZLevel;
+  zScore: number;
+  bias4h?: BiasSide;
+  bias1h?: BiasSide;
+  biasScore4h?: number;
+  biasScore1h?: number;
+  triggerLevel: Signal["triggerLevel"];
+  triggerPrice: number;
+  barTime: number;
+  barClose: number;
+  distanceFromLevel: number;
+  fundingRate?: number;
+  frBias?: FRBias;
+  oiChangePct?: number;
+  oiBias?: "rising" | "flat" | "falling";
+  longShortRatio?: number;
+  lsBias?: LsBias;
+  signalType?: SignalType;
+  relativeStrength?: number;
+  rsBias?: "strong" | "neutral" | "weak";
+  squeezeScore?: number;
+}
+
 export interface ScanResult {
   scannedAt: number;
   durationMs: number;
@@ -110,4 +143,6 @@ export interface ScanResult {
   // Market regime at scan time, derived from BTC 4H + FR.
   regime?: MarketRegime;
   regimeSummary?: string;
+  recentWindowBars?: number;
+  watchlist?: WatchCandidate[];
 }

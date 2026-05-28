@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import type { DeltaBias, FRBias, LsBias, MarketRegime, ScanResult, Signal, SignalType, Timeframe } from "@/lib/types";
+import type { DeltaBias, FRBias, LsBias, MarketRegime, ScanResult, Signal, SignalType, Timeframe, WatchCandidate } from "@/lib/types";
 import type { HistoryResult, SignalLog, Outcome } from "@/lib/db";
 
 type ApiResponse = (ScanResult & { stale: boolean; ageMs: number }) | {
@@ -35,7 +35,7 @@ function confluenceScore(s: Signal): number {
 }
 
 export default function DashboardPage() {
-  const [tab, setTab] = useState<"live" | "history">("live");
+  const [tab, setTab] = useState<"live" | "watchlist" | "history">("live");
 
   // ── Live tab state ──────────────────────────────────────────────────────────
   const [data, setData] = useState<ApiResponse | null>(null);
@@ -123,6 +123,11 @@ export default function DashboardPage() {
   const expiredCount =
     data && data.scannedAt !== null ? data.signals.length - activeSignals.length : 0;
 
+  const watchlist = useMemo<WatchCandidate[]>(() => {
+    if (!data || data.scannedAt === null || !("watchlist" in data)) return [];
+    return data.watchlist ?? [];
+  }, [data]);
+
   const filtered = useMemo<Signal[]>(() => {
     if (activeSignals.length === 0) return [];
     return activeSignals.filter((s) => {
@@ -149,7 +154,13 @@ export default function DashboardPage() {
               onClick={() => setTab("live")}
               className={`px-3 py-1.5 transition-colors ${tab === "live" ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-200"}`}
             >
-              Live
+              Entry
+            </button>
+            <button
+              onClick={() => setTab("watchlist")}
+              className={`px-3 py-1.5 transition-colors border-l border-neutral-700 ${tab === "watchlist" ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-200"}`}
+            >
+              Watchlist
             </button>
             <button
               onClick={() => setTab("history")}
@@ -158,7 +169,7 @@ export default function DashboardPage() {
               History
             </button>
           </div>
-          {tab === "live" && (
+          {tab !== "history" && (
             <button
               onClick={refresh}
               className="px-3 py-1.5 text-sm rounded-md border border-neutral-700 hover:border-neutral-500 transition-colors"
@@ -194,6 +205,7 @@ export default function DashboardPage() {
           >
             Last scan: {new Date(data.scannedAt).toLocaleString()} ·{" "}
             {data.symbolsScanned} symbols · {activeSignals.length} active signals
+            {watchlist.length > 0 && ` · ${watchlist.length} watchlist`}
             {expiredCount > 0 && ` · ${expiredCount} expired hidden`}
             {data.stale && " · stale, check cron"}
             {data.symbolsErrored.length > 0 && ` · ${data.symbolsErrored.length} errors`}
@@ -213,6 +225,11 @@ export default function DashboardPage() {
         </div>
       )}
 
+      {tab === "watchlist" && (
+        <WatchlistTab candidates={watchlist} loading={loading} />
+      )}
+
+      {tab === "live" && (<>
       <section className="mb-4 flex flex-wrap gap-2 items-center">
         <FilterGroup label="Timeframe">
           {(["15m"] as Timeframe[]).map((tf) => (
@@ -269,11 +286,99 @@ export default function DashboardPage() {
         }
       />
       </>)}
+      </>)}
     </main>
   );
 }
 
 // ─── History Tab ──────────────────────────────────────────────────────────────
+
+function WatchlistTab({ candidates, loading }: { candidates: WatchCandidate[]; loading: boolean }) {
+  if (loading) return <div className="text-neutral-500 text-sm py-12 text-center">Refreshing watchlist...</div>;
+  if (candidates.length === 0) {
+    return (
+      <div className="rounded-md border border-neutral-800 bg-neutral-900/40 p-8 text-center text-neutral-500 text-sm">
+        No near setups in the latest scan.
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-md border border-neutral-800 overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm min-w-[1180px]">
+          <thead className="bg-neutral-900 text-neutral-400 text-left">
+            <tr>
+              <th className="px-3 py-2 font-normal">Score</th>
+              <th className="px-3 py-2 font-normal">Symbol</th>
+              <th className="px-3 py-2 font-normal">State</th>
+              <th className="px-3 py-2 font-normal">Side</th>
+              <th className="px-3 py-2 font-normal">HTF bias</th>
+              <th className="px-3 py-2 font-normal">Z</th>
+              <th className="px-3 py-2 font-normal text-right">Level</th>
+              <th className="px-3 py-2 font-normal text-right">Close</th>
+              <th className="px-3 py-2 font-normal text-right">FR</th>
+              <th className="px-3 py-2 font-normal text-right">L/S</th>
+              <th className="px-3 py-2 font-normal text-right">OI</th>
+              <th className="px-3 py-2 font-normal text-right">RS</th>
+              <th className="px-3 py-2 font-normal text-center">Sqz</th>
+              <th className="px-3 py-2 font-normal">Ready / Missing</th>
+              <th className="px-3 py-2 font-normal">Time</th>
+              <th className="px-3 py-2 font-normal"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {candidates.map((row) => (
+              <tr key={`${row.symbol}-${row.side}-${row.barTime}`} className="border-t border-neutral-800 hover:bg-neutral-900/40">
+                <td className="px-3 py-2"><ScoreBadge score={row.score} /></td>
+                <td className="px-3 py-2 font-medium">{row.symbol}</td>
+                <td className="px-3 py-2">
+                  <span className={`px-1.5 py-0.5 text-xs rounded border ${row.state === "near_trigger" ? "bg-amber-950/70 text-amber-300 border-amber-700/60" : "bg-neutral-900 text-neutral-400 border-neutral-700"}`}>
+                    {row.state === "near_trigger" ? "near" : "watch"}
+                  </span>
+                </td>
+                <td className={`px-3 py-2 ${row.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>{row.side}</td>
+                <td className="px-3 py-2 text-xs text-neutral-400">4H {row.bias4h ?? "-"} / 1H {row.bias1h ?? "-"}</td>
+                <td className="px-3 py-2"><ZBadge level={row.zLevel} z={row.zScore} /></td>
+                <td className="px-3 py-2 text-right text-xs tabular-nums">
+                  <span className="text-neutral-300">{row.triggerLevel}</span>{" "}
+                  <span className="text-neutral-500">{formatPrice(row.triggerPrice)}</span>
+                </td>
+                <td className="px-3 py-2 text-right tabular-nums">{formatPrice(row.barClose)}</td>
+                <td className="px-3 py-2 text-right">
+                  {row.fundingRate !== undefined ? <FRBadge rate={row.fundingRate} bias={row.frBias} /> : <span className="text-neutral-600">-</span>}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  {row.longShortRatio !== undefined ? <LSBadge ratio={row.longShortRatio} bias={row.lsBias} /> : <span className="text-neutral-600">-</span>}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  {row.oiChangePct !== undefined ? <OIBadge changePct={row.oiChangePct} bias={row.oiBias} /> : <span className="text-neutral-600">-</span>}
+                </td>
+                <td className="px-3 py-2 text-right">
+                  {row.relativeStrength !== undefined ? <RSBadge rs={row.relativeStrength} bias={row.rsBias} side={row.side} /> : <span className="text-neutral-600">-</span>}
+                </td>
+                <td className="px-3 py-2 text-center">
+                  {row.squeezeScore !== undefined ? <SqueezeBadge score={row.squeezeScore} /> : <span className="text-neutral-600">-</span>}
+                </td>
+                <td className="px-3 py-2 text-xs">
+                  <div className="text-neutral-300">{row.reasons.slice(0, 2).join(" | ")}</div>
+                  {row.missing.length > 0 && <div className="text-amber-400">{row.missing.slice(0, 2).join(" | ")}</div>}
+                </td>
+                <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums">
+                  {new Date(row.barTime).toISOString().slice(5, 16).replace("T", " ")}
+                </td>
+                <td className="px-3 py-2 whitespace-nowrap">
+                  <a href={tradingViewSymbolUrl(row.symbol, row.timeframe)} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300">TV</a>
+                  <a href={binanceFuturesUrl(row.symbol)} target="_blank" rel="noopener noreferrer" className="ml-3 text-xs text-amber-400 hover:text-amber-300">BN</a>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
 
 function OutcomeBadge({ outcome }: { outcome: Outcome }) {
   const cfg: Record<Outcome, { label: string; cls: string }> = {
@@ -603,9 +708,13 @@ function SignalTable({ signals, regime }: { signals: Signal[]; regime?: MarketRe
 }
 
 function tradingViewUrl(s: Signal): string {
+  return tradingViewSymbolUrl(s.symbol, s.timeframe);
+}
+
+function tradingViewSymbolUrl(symbol: string, timeframe: Timeframe): string {
   const interval =
-    s.timeframe === "1h" ? "60" : s.timeframe === "4h" ? "240" : s.timeframe.replace("m", "");
-  return `https://www.tradingview.com/chart/?symbol=BINANCE:${s.symbol}.P&interval=${interval}`;
+    timeframe === "1h" ? "60" : timeframe === "4h" ? "240" : timeframe.replace("m", "");
+  return `https://www.tradingview.com/chart/?symbol=BINANCE:${symbol}.P&interval=${interval}`;
 }
 
 function binanceFuturesUrl(symbol: string): string {

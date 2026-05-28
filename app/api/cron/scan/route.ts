@@ -9,9 +9,9 @@ import {
 } from "@/lib/binance";
 import { detectBTCRegime } from "@/lib/regime";
 import { computeATR, computeRS, computeSqueezeScore } from "@/lib/atr";
-import type { FRBias, LsBias, MarketRegime, Signal, SignalType, ScanResult } from "@/lib/types";
+import type { FRBias, LsBias, MarketRegime, Signal, SignalType, ScanResult, WatchCandidate } from "@/lib/types";
 import { analyzeBias } from "@/lib/bias";
-import { detectSignal } from "@/lib/signals";
+import { detectRecentSignals, detectWatchCandidate } from "@/lib/signals";
 import { storeScanResult } from "@/lib/kv";
 import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, expireOldSignals, pruneOldSignals } from "@/lib/db";
 import { resolveOutcome } from "@/lib/outcomes";
@@ -21,6 +21,8 @@ export const dynamic = "force-dynamic";
 
 const SYMBOL_LIMIT  = parseInt(process.env.SYMBOL_LIMIT     ?? "150", 10);
 const CONCURRENCY   = parseInt(process.env.FETCH_CONCURRENCY ?? "20",  10);
+const RECENT_SIGNAL_BARS = parseInt(process.env.RECENT_SIGNAL_BARS ?? "8", 10);
+const WATCHLIST_LIMIT = parseInt(process.env.WATCHLIST_LIMIT ?? "30", 10);
 
 function authorize(req: NextRequest): boolean {
   const expected = process.env.CRON_SECRET;
@@ -68,8 +70,11 @@ export async function GET(req: NextRequest) {
   // 4. Main scan loop — 15m signal detection, then HTF enrichment only if triggered.
   const results = await withConcurrency(symbols, CONCURRENCY, async (symbol) => {
     const entryKlines = await fetchKlines(symbol, "15m");
-    const signal = detectSignal(symbol, "15m", entryKlines);
-    if (!signal) return null;
+    const recentSignals = detectRecentSignals(symbol, "15m", entryKlines, RECENT_SIGNAL_BARS);
+    const watchSeed = detectWatchCandidate(symbol, "15m", entryKlines);
+    if (recentSignals.length === 0 && (!watchSeed || watchSeed.score < 5)) {
+      return { signals: [] as Signal[], watch: null as WatchCandidate | null };
+    }
 
     const [oneHourKlines, fourHourKlines, oiHistory, lsData] = await Promise.all([
       fetchKlines(symbol, "1h"),
@@ -80,13 +85,9 @@ export async function GET(req: NextRequest) {
 
     const bias1h = analyzeBias(oneHourKlines);
     const bias4h = analyzeBias(fourHourKlines);
-    if (!passesBiasConfirmation(signal, bias1h, bias4h, regime)) return null;
 
     // FR — interpretation flips in flush regime for longs
     const frInfo = fundingRates.get(symbol);
-    const frBias = frInfo !== undefined
-      ? classifyFR(signal.side, frInfo.lastFundingRate, regime)
-      : undefined;
 
     // OI
     let oiChangePct: number | undefined;
@@ -109,14 +110,9 @@ export async function GET(req: NextRequest) {
       : undefined;
 
     // Signal type — what kind of setup is this given the regime?
-    const signalType = determineSignalType(signal.side, regime, lsBias, frBias);
 
     // ATR-based targets from 1H klines
     const atr1h = computeATR(oneHourKlines, 14);
-    const entry = signal.barClose;
-    const tp1 = atr1h > 0 ? (signal.side === "long" ? entry + 1.5 * atr1h : entry - 1.5 * atr1h) : undefined;
-    const tp2 = atr1h > 0 ? (signal.side === "long" ? entry + 3.0 * atr1h : entry - 3.0 * atr1h) : undefined;
-    const sl  = atr1h > 0 ? (signal.side === "long" ? entry - 1.0 * atr1h : entry + 1.0 * atr1h) : undefined;
 
     // Relative Strength vs BTC (reuses already-fetched 4H klines)
     const relativeStrength = btcKlines4h
@@ -129,36 +125,69 @@ export async function GET(req: NextRequest) {
       : "neutral";
 
     // Squeeze Potential Score (0–6)
-    const squeezeScore = computeSqueezeScore(
-      signal.side,
-      frInfo?.lastFundingRate,
-      longShortRatio,
-      oiBias,
-      relativeStrength,
-    );
+    const enrichedSignals = recentSignals
+      .filter((signal) => passesBiasConfirmation(signal, bias1h, bias4h, regime))
+      .map((signal) => {
+        const frBias = frInfo !== undefined
+          ? classifyFR(signal.side, frInfo.lastFundingRate, regime)
+          : undefined;
+        const signalType = determineSignalType(signal.side, regime, lsBias, frBias);
+        const entry = signal.barClose;
+        const tp1 = atr1h > 0 ? (signal.side === "long" ? entry + 1.5 * atr1h : entry - 1.5 * atr1h) : undefined;
+        const tp2 = atr1h > 0 ? (signal.side === "long" ? entry + 3.0 * atr1h : entry - 3.0 * atr1h) : undefined;
+        const sl  = atr1h > 0 ? (signal.side === "long" ? entry - 1.0 * atr1h : entry + 1.0 * atr1h) : undefined;
+        const squeezeScore = computeSqueezeScore(
+          signal.side,
+          frInfo?.lastFundingRate,
+          longShortRatio,
+          oiBias,
+          relativeStrength,
+        );
 
-    return {
-      ...signal,
-      bias1h:      bias1h.bias,
-      bias4h:      bias4h.bias,
-      biasScore1h: bias1h.score,
-      biasScore4h: bias4h.score,
-      ...(frInfo !== undefined ? { fundingRate: frInfo.lastFundingRate, frBias } : {}),
-      ...(oiChangePct !== undefined ? { oiChangePct, oiBias } : {}),
-      ...(longShortRatio !== undefined ? { longShortRatio, lsBias } : {}),
-      signalType,
-      ...(atr1h > 0 ? { atr1h, tp1, tp2, sl } : {}),
-      ...(relativeStrength !== undefined ? { relativeStrength, rsBias } : {}),
-      squeezeScore,
-    };
+        return {
+          ...signal,
+          bias1h:      bias1h.bias,
+          bias4h:      bias4h.bias,
+          biasScore1h: bias1h.score,
+          biasScore4h: bias4h.score,
+          ...(frInfo !== undefined ? { fundingRate: frInfo.lastFundingRate, frBias } : {}),
+          ...(oiChangePct !== undefined ? { oiChangePct, oiBias } : {}),
+          ...(longShortRatio !== undefined ? { longShortRatio, lsBias } : {}),
+          signalType,
+          ...(atr1h > 0 ? { atr1h, tp1, tp2, sl } : {}),
+          ...(relativeStrength !== undefined ? { relativeStrength, rsBias } : {}),
+          squeezeScore,
+        };
+      });
+
+    const watch = watchSeed
+      ? enrichWatchCandidate(watchSeed, {
+          bias1h,
+          bias4h,
+          regime,
+          fr: frInfo?.lastFundingRate,
+          oiChangePct,
+          oiBias,
+          longShortRatio,
+          lsBias,
+          relativeStrength,
+          rsBias,
+        })
+      : null;
+
+    return { signals: enrichedSignals, watch };
   });
 
   // 5. Collect
   const signals: Signal[] = [];
+  const watchlist: WatchCandidate[] = [];
   const errored: string[] = [];
   for (const r of results) {
     if ("error" in r) errored.push(r.item);
-    else if (r.result)  signals.push(r.result);
+    else {
+      signals.push(...r.result.signals);
+      if (r.result.watch) watchlist.push(r.result.watch);
+    }
   }
 
   // 6. Rank — HTF + FR + delta + OI + L/S, then Z
@@ -179,6 +208,7 @@ export async function GET(req: NextRequest) {
     if (b.zLevel !== a.zLevel) return b.zLevel - a.zLevel;
     return Math.abs(b.zScore) - Math.abs(a.zScore);
   });
+  watchlist.sort((a, b) => b.score - a.score || b.zLevel - a.zLevel || Math.abs(b.zScore) - Math.abs(a.zScore));
 
   const scanResult: ScanResult = {
     scannedAt:       Date.now(),
@@ -188,6 +218,8 @@ export async function GET(req: NextRequest) {
     signals,
     regime:          regimeResult.regime,
     regimeSummary:   regimeResult.summary,
+    recentWindowBars: RECENT_SIGNAL_BARS,
+    watchlist:        watchlist.slice(0, WATCHLIST_LIMIT),
   };
 
   try {
@@ -250,6 +282,8 @@ export async function GET(req: NextRequest) {
     durationMs:     Date.now() - t0,
     symbolsScanned: scanResult.symbolsScanned,
     signalsFound:   scanResult.signals.length,
+    watchlistFound: scanResult.watchlist?.length ?? 0,
+    recentWindowBars: RECENT_SIGNAL_BARS,
     errors:         scanResult.symbolsErrored.length,
     regime:         scanResult.regime,
     dbSignalsInserted,
@@ -263,6 +297,75 @@ export async function GET(req: NextRequest) {
 // In FLUSH regime, long signals with bearish HTF are contrarian bounces — don't block them.
 // Shorts confirmed normally; so do all non-flush signals.
 type Bias = ReturnType<typeof analyzeBias>;
+
+function enrichWatchCandidate(
+  watch: WatchCandidate,
+  ctx: {
+    bias1h: Bias;
+    bias4h: Bias;
+    regime: MarketRegime;
+    fr?: number;
+    oiChangePct?: number;
+    oiBias?: "rising" | "flat" | "falling";
+    longShortRatio?: number;
+    lsBias?: LsBias;
+    relativeStrength?: number;
+    rsBias?: Signal["rsBias"];
+  }
+): WatchCandidate {
+  const frBias = ctx.fr !== undefined ? classifyFR(watch.side, ctx.fr, ctx.regime) : undefined;
+  const signalType = determineSignalType(watch.side, ctx.regime, ctx.lsBias, frBias);
+  const squeezeScore = computeSqueezeScore(
+    watch.side,
+    ctx.fr,
+    ctx.longShortRatio,
+    ctx.oiBias,
+    ctx.relativeStrength,
+  );
+
+  let score = watch.score;
+  const reasons = [...watch.reasons];
+  const missing = [...watch.missing];
+  const opposite = watch.side === "long" ? "short" : "long";
+
+  if (ctx.bias4h.bias === watch.side || ctx.bias1h.bias === watch.side) {
+    score += 2;
+    reasons.push("HTF bias supportive");
+  } else if (ctx.bias4h.bias === opposite || ctx.bias1h.bias === opposite) {
+    score -= 2;
+    missing.push("HTF bias currently opposite");
+  }
+
+  if (frBias === "favorable") score += 1;
+  if (frBias === "unfavorable") score -= 1;
+
+  const favoredLs = watch.side === "long" ? "crowded_shorts" : "crowded_longs";
+  const opposedLs = watch.side === "long" ? "crowded_longs" : "crowded_shorts";
+  if (ctx.lsBias === favoredLs) score += 1;
+  if (ctx.lsBias === opposedLs) score -= 1;
+  if (ctx.oiBias === "rising") score += 1;
+  if ((watch.side === "long" && ctx.rsBias === "strong") || (watch.side === "short" && ctx.rsBias === "weak")) score += 1;
+  if ((watch.side === "long" && ctx.rsBias === "weak") || (watch.side === "short" && ctx.rsBias === "strong")) score -= 1;
+  score += Math.min(2, Math.floor(squeezeScore / 3));
+
+  return {
+    ...watch,
+    score,
+    reasons,
+    missing,
+    bias1h: ctx.bias1h.bias,
+    bias4h: ctx.bias4h.bias,
+    biasScore1h: ctx.bias1h.score,
+    biasScore4h: ctx.bias4h.score,
+    ...(ctx.fr !== undefined ? { fundingRate: ctx.fr, frBias } : {}),
+    ...(ctx.oiChangePct !== undefined ? { oiChangePct: ctx.oiChangePct, oiBias: ctx.oiBias } : {}),
+    ...(ctx.longShortRatio !== undefined ? { longShortRatio: ctx.longShortRatio, lsBias: ctx.lsBias } : {}),
+    signalType,
+    ...(ctx.relativeStrength !== undefined ? { relativeStrength: ctx.relativeStrength, rsBias: ctx.rsBias } : {}),
+    squeezeScore,
+  };
+}
+
 function passesBiasConfirmation(
   signal: Signal,
   bias1h: Bias,

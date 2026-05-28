@@ -18,6 +18,9 @@ This mirrors the `long_signal` / `short_signal` lines of `market_profile_tpo_v6_
 
 ## How to read the dashboard
 
+- **Entry**: actionable MP+Z triggers from the latest scan. The cron replays the last `RECENT_SIGNAL_BARS` closed candles and the UI still hides expired entries.
+- **Watchlist**: pre-signal alts that are near profile levels but may still need volume, candle direction, or bias confirmation.
+- **History**: persisted Neon outcome tracking for triggered signals.
 - **TF**: candle timeframe that produced the signal.
 - **Side**: long means a bullish rejection from support-like levels; short means a bearish rejection from resistance-like levels.
 - **HTF bias**: the 4H and 1H rule-based bias that confirmed the 15m trigger.
@@ -54,9 +57,12 @@ UPSTASH_REDIS_REST_TOKEN=...
 DATABASE_URL=postgresql://...
 CRON_SECRET=<openssl rand -hex 32>
 SIGNAL_RETENTION_DAYS=14
+RECENT_SIGNAL_BARS=8
+WATCHLIST_LIMIT=30
 ```
 
 `SIGNAL_RETENTION_DAYS` is optional. The cron deletes old `signal_log` rows after this many days so Neon storage stays bounded.
+`RECENT_SIGNAL_BARS` controls how many recently closed 15m candles are replayed each scan, so a valid entry trigger can still be captured if one cron tick missed it. `WATCHLIST_LIMIT` caps the pre-signal bias/watchlist table.
 
 ### 4. Cron
 
