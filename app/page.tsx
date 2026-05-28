@@ -18,6 +18,11 @@ const TIMEFRAME_MS: Record<Timeframe, number> = {
   "4h": 4 * 60 * 60_000,
 };
 
+type SortDir = "asc" | "desc";
+type WatchSortKey = "score" | "symbol" | "window" | "side" | "z" | "squeeze" | "time";
+type HistoryFilter = Outcome | "all";
+type HistoryConfidenceFilter = "all" | "high" | "medium" | "low";
+
 // Confluence score: each of the 6 factors contributes ±1.
 // Range: −6 (everything opposed) to +6 (everything aligned).
 function confluenceScore(s: Signal): number {
@@ -294,6 +299,41 @@ export default function DashboardPage() {
 // ─── History Tab ──────────────────────────────────────────────────────────────
 
 function WatchlistTab({ candidates, loading }: { candidates: WatchCandidate[]; loading: boolean }) {
+  const [sortKey, setSortKey] = useState<WatchSortKey>("score");
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const sorted = useMemo(() => {
+    const windowRank = { "1-2d": 1, "3-5d": 2, "5-7d": 3 };
+    const valueFor = (row: WatchCandidate): number | string => {
+      if (sortKey === "score") return row.score;
+      if (sortKey === "symbol") return row.symbol;
+      if (sortKey === "window") return windowRank[row.biasWindow ?? "1-2d"];
+      if (sortKey === "side") return row.side;
+      if (sortKey === "z") return row.zScore;
+      if (sortKey === "squeeze") return row.squeezeScore ?? -1;
+      return row.barTime;
+    };
+    return [...candidates].sort((a, b) => {
+      const av = valueFor(a);
+      const bv = valueFor(b);
+      const cmp = typeof av === "string" && typeof bv === "string"
+        ? av.localeCompare(bv)
+        : Number(av) - Number(bv);
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+  }, [candidates, sortDir, sortKey]);
+
+  const setSort = (key: WatchSortKey) => {
+    if (sortKey === key) {
+      setSortDir((prev) => prev === "asc" ? "desc" : "asc");
+      return;
+    }
+    setSortKey(key);
+    setSortDir(key === "symbol" || key === "side" ? "asc" : "desc");
+  };
+
+  const sortLabel = (label: string, key: WatchSortKey) =>
+    `${label}${sortKey === key ? (sortDir === "asc" ? " ↑" : " ↓") : ""}`;
+
   if (loading) return <div className="text-neutral-500 text-sm py-12 text-center">Refreshing watchlist...</div>;
   if (candidates.length === 0) {
     return (
@@ -309,27 +349,27 @@ function WatchlistTab({ candidates, loading }: { candidates: WatchCandidate[]; l
         <table className="w-full text-sm min-w-[1180px]">
           <thead className="bg-neutral-900 text-neutral-400 text-left">
             <tr>
-              <th className="px-3 py-2 font-normal">Score</th>
-              <th className="px-3 py-2 font-normal">Symbol</th>
+              <th className="px-3 py-2 font-normal"><button onClick={() => setSort("score")}>{sortLabel("Score", "score")}</button></th>
+              <th className="px-3 py-2 font-normal"><button onClick={() => setSort("symbol")}>{sortLabel("Symbol", "symbol")}</button></th>
               <th className="px-3 py-2 font-normal">State</th>
-              <th className="px-3 py-2 font-normal">Window</th>
-              <th className="px-3 py-2 font-normal">Side</th>
+              <th className="px-3 py-2 font-normal"><button onClick={() => setSort("window")}>{sortLabel("Window", "window")}</button></th>
+              <th className="px-3 py-2 font-normal"><button onClick={() => setSort("side")}>{sortLabel("Side", "side")}</button></th>
               <th className="px-3 py-2 font-normal">HTF bias</th>
-              <th className="px-3 py-2 font-normal">Z</th>
+              <th className="px-3 py-2 font-normal"><button onClick={() => setSort("z")}>{sortLabel("Z", "z")}</button></th>
               <th className="px-3 py-2 font-normal text-right">Level</th>
               <th className="px-3 py-2 font-normal text-right">Close</th>
               <th className="px-3 py-2 font-normal text-right">FR</th>
               <th className="px-3 py-2 font-normal text-right">L/S</th>
               <th className="px-3 py-2 font-normal text-right">OI</th>
               <th className="px-3 py-2 font-normal text-right">RS</th>
-              <th className="px-3 py-2 font-normal text-center">Sqz</th>
+              <th className="px-3 py-2 font-normal text-center"><button onClick={() => setSort("squeeze")}>{sortLabel("Sqz", "squeeze")}</button></th>
               <th className="px-3 py-2 font-normal">Ready / Missing</th>
-              <th className="px-3 py-2 font-normal">Time</th>
+              <th className="px-3 py-2 font-normal"><button onClick={() => setSort("time")}>{sortLabel("Time", "time")}</button></th>
               <th className="px-3 py-2 font-normal"></th>
             </tr>
           </thead>
           <tbody>
-            {candidates.map((row) => (
+            {sorted.map((row) => (
               <tr key={`${row.symbol}-${row.side}-${row.barTime}`} className="border-t border-neutral-800 hover:bg-neutral-900/40">
                 <td className="px-3 py-2"><ScoreBadge score={row.score} /></td>
                 <td className="px-3 py-2 font-medium">{row.symbol}</td>
@@ -399,29 +439,58 @@ function OutcomeBadge({ outcome }: { outcome: Outcome }) {
 }
 
 function HistoryTab({ history, loading, err }: { history: HistoryResult | null; loading: boolean; err: string | null }) {
+  const [outcomeFilter, setOutcomeFilter] = useState<HistoryFilter>("all");
+  const [confidenceFilter, setConfidenceFilter] = useState<HistoryConfidenceFilter>("all");
   if (loading) return <div className="text-neutral-500 text-sm py-12 text-center">Loading signal history…</div>;
   if (err)     return <div className="text-red-400 text-sm py-4">Error: {err}</div>;
   if (!history) return null;
 
   const { signals, stats } = history;
   const resolved = stats.tp2 + stats.tp1 + stats.sl + stats.expired;
+  const filteredSignals = signals.filter((row) => {
+    if (outcomeFilter !== "all" && row.outcome !== outcomeFilter) return false;
+    if (confidenceFilter !== "all" && historyConfidenceBucket(row) !== confidenceFilter) return false;
+    return true;
+  });
+  const confidenceRows = historyPerformanceRows(signals, historyConfidenceBucket);
+  const squeezeRows = historyPerformanceRows(signals, historySqueezeBucket);
+  const profileRows = historyPerformanceRows(signals, (row) => row.trigger_level || "unknown");
 
   return (
     <div>
       {/* Stats bar */}
       <div className="mb-4 flex flex-wrap gap-3 text-sm">
-        <StatPill label="Total tracked" value={stats.total.toString()} />
-        <StatPill label="Active" value={stats.active.toString()} color="text-blue-300" />
-        <StatPill label="TP2" value={`${stats.tp2} (${stats.tp2Rate}%)`} color="text-emerald-400" />
-        <StatPill label="TP1" value={`${stats.tp1} (${stats.tp1Rate}%)`} color="text-emerald-300" />
-        <StatPill label="SL"  value={`${stats.sl} (${stats.slRate}%)`}   color="text-red-400" />
-        <StatPill label="Expired" value={stats.expired.toString()} color="text-neutral-500" />
+        <StatPill label="Total tracked" value={stats.total.toString()} active={outcomeFilter === "all"} onClick={() => setOutcomeFilter("all")} />
+        <StatPill label="Active" value={stats.active.toString()} color="text-blue-300" active={outcomeFilter === "active"} onClick={() => setOutcomeFilter("active")} />
+        <StatPill label="TP2" value={`${stats.tp2} (${stats.tp2Rate}%)`} color="text-emerald-400" active={outcomeFilter === "tp2"} onClick={() => setOutcomeFilter("tp2")} />
+        <StatPill label="TP1" value={`${stats.tp1} (${stats.tp1Rate}%)`} color="text-emerald-300" active={outcomeFilter === "tp1"} onClick={() => setOutcomeFilter("tp1")} />
+        <StatPill label="SL"  value={`${stats.sl} (${stats.slRate}%)`}   color="text-red-400" active={outcomeFilter === "sl"} onClick={() => setOutcomeFilter("sl")} />
+        <StatPill label="Expired" value={stats.expired.toString()} color="text-neutral-500" active={outcomeFilter === "expired"} onClick={() => setOutcomeFilter("expired")} />
         {resolved > 0 && (
           <StatPill label="Win rate (TP1+TP2)" value={`${Math.round((stats.tp1 + stats.tp2) / resolved * 100)}%`} color="text-amber-300" />
         )}
       </div>
 
-      {signals.length === 0 ? (
+      <section className="mb-4 flex flex-wrap gap-2 items-center">
+        <FilterGroup label="Confidence">
+          {(["all", "high", "medium", "low"] as const).map((bucket) => (
+            <Chip key={bucket} active={confidenceFilter === bucket} onClick={() => setConfidenceFilter(bucket)}>
+              {bucket}
+            </Chip>
+          ))}
+        </FilterGroup>
+        <div className="ml-auto text-sm text-neutral-400">
+          {filteredSignals.length} row{filteredSignals.length === 1 ? "" : "s"}
+        </div>
+      </section>
+
+      <div className="mb-4 grid gap-3 lg:grid-cols-3">
+        <HistoryBreakdown title="Confidence" rows={confidenceRows} />
+        <HistoryBreakdown title="SQZ" rows={squeezeRows} />
+        <HistoryBreakdown title="Profile" rows={profileRows} />
+      </div>
+
+      {filteredSignals.length === 0 ? (
         <div className="rounded-md border border-neutral-800 bg-neutral-900/40 p-8 text-center text-neutral-500 text-sm">
           No signals tracked yet — history builds up after the next cron scan.
         </div>
@@ -448,7 +517,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
                 </tr>
               </thead>
               <tbody>
-                {signals.map((row) => {
+                {filteredSignals.map((row) => {
                   const durationMs = row.outcome_at ? row.outcome_at - row.bar_time : null;
                   const mfe = row.max_favorable && row.entry_price
                     ? Math.abs(row.max_favorable) / row.entry_price * 100 : null;
@@ -504,7 +573,106 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
   );
 }
 
-function StatPill({ label, value, color = "text-neutral-200" }: { label: string; value: string; color?: string }) {
+interface HistoryPerfRow {
+  label: string;
+  total: number;
+  resolved: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  avgMfe: number | null;
+  avgMae: number | null;
+}
+
+function historyConfidenceBucket(row: SignalLog): HistoryConfidenceFilter {
+  const sqz = row.squeeze_score ?? 0;
+  const score = row.z_level + Math.min(3, sqz);
+  if (score >= 5) return "high";
+  if (score >= 3) return "medium";
+  return "low";
+}
+
+function historySqueezeBucket(row: SignalLog): string {
+  const sqz = row.squeeze_score;
+  if (sqz === null) return "none";
+  if (sqz >= 5) return "5-6";
+  if (sqz >= 3) return "3-4";
+  if (sqz >= 1) return "1-2";
+  return "0";
+}
+
+function historyPerformanceRows(
+  rows: SignalLog[],
+  bucketFor: (row: SignalLog) => string
+): HistoryPerfRow[] {
+  const grouped = new Map<string, SignalLog[]>();
+  for (const row of rows) {
+    const bucket = bucketFor(row);
+    grouped.set(bucket, [...(grouped.get(bucket) ?? []), row]);
+  }
+
+  return Array.from(grouped.entries()).map(([label, group]) => {
+    const resolved = group.filter((row) => row.outcome !== "active");
+    const wins = resolved.filter((row) => row.outcome === "tp1" || row.outcome === "tp2").length;
+    const losses = resolved.filter((row) => row.outcome === "sl").length;
+    const mfeVals = resolved
+      .filter((row) => row.max_favorable !== null && row.entry_price)
+      .map((row) => Math.abs(row.max_favorable!) / row.entry_price * 100);
+    const maeVals = resolved
+      .filter((row) => row.max_adverse !== null && row.entry_price)
+      .map((row) => Math.abs(row.max_adverse!) / row.entry_price * 100);
+    return {
+      label,
+      total: group.length,
+      resolved: resolved.length,
+      wins,
+      losses,
+      winRate: resolved.length ? Math.round(wins / resolved.length * 100) : 0,
+      avgMfe: mfeVals.length ? mfeVals.reduce((a, b) => a + b, 0) / mfeVals.length : null,
+      avgMae: maeVals.length ? maeVals.reduce((a, b) => a + b, 0) / maeVals.length : null,
+    };
+  }).sort((a, b) => b.total - a.total);
+}
+
+function HistoryBreakdown({ title, rows }: { title: string; rows: HistoryPerfRow[] }) {
+  return (
+    <div className="rounded-md border border-neutral-800 bg-neutral-900/30 overflow-hidden">
+      <div className="px-3 py-2 text-xs uppercase tracking-wide text-neutral-500 border-b border-neutral-800">{title}</div>
+      <table className="w-full text-xs">
+        <thead className="text-neutral-500 text-left">
+          <tr>
+            <th className="px-3 py-2 font-normal">Bucket</th>
+            <th className="px-2 py-2 font-normal text-right">N</th>
+            <th className="px-2 py-2 font-normal text-right">Win</th>
+            <th className="px-2 py-2 font-normal text-right">MFE</th>
+            <th className="px-3 py-2 font-normal text-right">MAE</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.slice(0, 5).map((row) => (
+            <tr key={row.label} className="border-t border-neutral-800">
+              <td className="px-3 py-2 text-neutral-300">{row.label}</td>
+              <td className="px-2 py-2 text-right tabular-nums text-neutral-400">{row.total}</td>
+              <td className="px-2 py-2 text-right tabular-nums text-emerald-300">{row.resolved ? `${row.winRate}%` : "-"}</td>
+              <td className="px-2 py-2 text-right tabular-nums text-emerald-400">{row.avgMfe !== null ? `${row.avgMfe.toFixed(2)}%` : "-"}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-red-400">{row.avgMae !== null ? `${row.avgMae.toFixed(2)}%` : "-"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function StatPill({ label, value, color = "text-neutral-200", active = false, onClick }: { label: string; value: string; color?: string; active?: boolean; onClick?: () => void }) {
+  if (onClick) {
+    return (
+      <button onClick={onClick} className={`px-3 py-1.5 rounded-md border text-left ${active ? "bg-neutral-100 border-neutral-100" : "bg-neutral-900 border-neutral-800"}`}>
+        <span className={`text-xs ${active ? "text-neutral-600" : "text-neutral-500"}`}>{label} </span>
+        <span className={`font-medium ${active ? "text-neutral-950" : color}`}>{value}</span>
+      </button>
+    );
+  }
   return (
     <div className="px-3 py-1.5 rounded-md bg-neutral-900 border border-neutral-800">
       <span className="text-neutral-500 text-xs">{label} </span>
