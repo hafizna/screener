@@ -213,7 +213,28 @@ export async function fetchFundingRates(signal?: AbortSignal): Promise<Map<strin
   return map;
 }
 
-// Run a list of async tasks with bounded concurrency. Critical for staying
+// Fetch current mark prices for all USDT-M perpetuals (reuses premiumIndex, weight 10).
+// Returns a map of symbol → mark price.
+export async function fetchMarkPrices(): Promise<Map<string, number>> {
+  const url = `${FAPI_BASE}/fapi/v1/premiumIndex`;
+  let res: Response;
+  try {
+    res = await fetch(url, { cache: "no-store" });
+  } catch (e) {
+    throw new Error(`Network error fetching mark prices: ${(e as Error).message}`);
+  }
+  if (!res.ok) throw new Error(`premiumIndex failed: ${res.status}`);
+  const data = (await res.json()) as Array<{ symbol: string; markPrice: string }>;
+  const map = new Map<string, number>();
+  for (const d of data) {
+    if (!d.symbol.endsWith("USDT")) continue;
+    const price = parseFloat(d.markPrice);
+    if (isFinite(price) && price > 0) map.set(d.symbol, price);
+  }
+  return map;
+}
+
+// Run a list of async tasks with bounded concurrency.
 // under Binance's burst limit and Vercel's function timeout.
 //
 // We use 20 concurrent fetches: at ~150ms latency per fetch, that's ~7.5

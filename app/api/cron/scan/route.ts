@@ -21,7 +21,8 @@ export const dynamic = "force-dynamic";
 
 const SYMBOL_LIMIT  = parseInt(process.env.SYMBOL_LIMIT     ?? "150", 10);
 const CONCURRENCY   = parseInt(process.env.FETCH_CONCURRENCY ?? "20",  10);
-const RECENT_SIGNAL_BARS = parseInt(process.env.RECENT_SIGNAL_BARS ?? "8", 10);
+const RECENT_SIGNAL_BARS    = parseInt(process.env.RECENT_SIGNAL_BARS    ?? "8", 10);
+const RECENT_SIGNAL_BARS_1H = parseInt(process.env.RECENT_SIGNAL_BARS_1H ?? "4", 10);
 const WATCHLIST_LIMIT = parseInt(process.env.WATCHLIST_LIMIT ?? "30", 10);
 
 function authorize(req: NextRequest): boolean {
@@ -114,6 +115,10 @@ export async function GET(req: NextRequest) {
     // ATR-based targets from 1H klines
     const atr1h = computeATR(oneHourKlines, 14);
 
+    // Also detect 1H signals (free — klines already fetched above)
+    const recentSignals1h = detectRecentSignals(symbol, "1h", oneHourKlines, RECENT_SIGNAL_BARS_1H);
+    const allRecentSignals = [...recentSignals, ...recentSignals1h];
+
     // Relative Strength vs BTC (reuses already-fetched 4H klines)
     const relativeStrength = btcKlines4h
       ? computeRS(fourHourKlines, btcKlines4h)
@@ -125,7 +130,7 @@ export async function GET(req: NextRequest) {
       : "neutral";
 
     // Squeeze Potential Score (0–6)
-    const enrichedSignals = recentSignals
+    const enrichedSignals = allRecentSignals
       .filter((signal) => passesBiasConfirmation(signal, bias1h, bias4h, regime))
       .map((signal) => {
         const frBias = frInfo !== undefined

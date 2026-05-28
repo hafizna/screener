@@ -53,7 +53,8 @@ export default function DashboardPage() {
   const [histErr, setHistErr] = useState<string | null>(null);
 
   // ── Watchlist (tracked signals from DB) ──────────────────────────────────────
-  const [trackedSignals, setTrackedSignals] = useState<SignalLog[] | null>(null);
+  type TrackedSignal = SignalLog & { current_price: number | null };
+  const [trackedSignals, setTrackedSignals] = useState<TrackedSignal[] | null>(null);
   const [trackedLoading, setTrackedLoading] = useState(false);
 
   // Watchlist — persisted in localStorage so it survives page refresh
@@ -71,7 +72,7 @@ export default function DashboardPage() {
   }
 
   // Filters
-  const [tfFilter, setTfFilter] = useState<Set<Timeframe>>(new Set(["15m"]));
+  const [tfFilter, setTfFilter] = useState<Set<Timeframe>>(new Set(["15m", "1h"]));
   const [sideFilter, setSideFilter] = useState<"all" | "long" | "short">("all");
   const [minZ, setMinZ] = useState<2 | 3>(2);
   const [frFilter, setFrFilter] = useState<"all" | "favorable">("all");
@@ -111,7 +112,7 @@ export default function DashboardPage() {
     setTrackedLoading(true);
     try {
       const res = await fetch("/api/watchlist", { cache: "no-store" });
-      if (res.ok) setTrackedSignals(((await res.json()) as { signals: SignalLog[] }).signals);
+      if (res.ok) setTrackedSignals(((await res.json()) as { signals: TrackedSignal[] }).signals);
     } catch { /* non-fatal */ }
     finally { setTrackedLoading(false); }
   }
@@ -287,7 +288,7 @@ export default function DashboardPage() {
       {tab === "live" && (<>
       <section className="mb-4 flex flex-wrap gap-2 items-center">
         <FilterGroup label="Timeframe">
-          {(["15m"] as Timeframe[]).map((tf) => (
+          {(["15m", "1h"] as Timeframe[]).map((tf) => (
             <Chip
               key={tf}
               active={tfFilter.has(tf)}
@@ -348,7 +349,7 @@ export default function DashboardPage() {
 
 // ─── History Tab ──────────────────────────────────────────────────────────────
 
-function TradeLifecycleBadge({ signal }: { signal: SignalLog }) {
+function TradeLifecycleBadge({ signal, currentPrice }: { signal: SignalLog; currentPrice?: number | null }) {
   if (signal.outcome !== "active") {
     return <OutcomeBadge outcome={signal.outcome} />;
   }
@@ -366,6 +367,17 @@ function TradeLifecycleBadge({ signal }: { signal: SignalLog }) {
       </span>
     );
   }
+  // Near Entry: current price within 1% of entry — this is the moment to act
+  if (currentPrice != null && signal.entry_price > 0) {
+    const distPct = Math.abs(currentPrice - signal.entry_price) / signal.entry_price * 100;
+    if (distPct <= 1.0) {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border bg-amber-950/80 text-amber-300 border-amber-700/70 animate-pulse">
+          Near Entry {distPct.toFixed(2)}%
+        </span>
+      );
+    }
+  }
   return (
     <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border bg-neutral-900 text-neutral-400 border-neutral-700">
       Waiting
@@ -382,7 +394,7 @@ function WatchlistTab({
 }: {
   candidates: WatchCandidate[];
   loading: boolean;
-  tracked: SignalLog[] | null;
+  tracked: (SignalLog & { current_price: number | null })[] | null;
   trackedLoading: boolean;
   onReloadTracked: () => void;
 }) {
@@ -423,7 +435,16 @@ function WatchlistTab({
 
   // Split tracked signals by lifecycle state
   const running  = tracked?.filter((s) => s.outcome === "active" && s.best_tp != null) ?? [];
-  const waiting  = tracked?.filter((s) => s.outcome === "active" && s.best_tp == null) ?? [];
+  const nearEntry = tracked?.filter((s) => {
+    if (s.outcome !== "active" || s.best_tp != null) return false;
+    if (s.current_price == null || s.entry_price <= 0) return false;
+    return Math.abs(s.current_price - s.entry_price) / s.entry_price * 100 <= 1.0;
+  }) ?? [];
+  const waiting  = tracked?.filter((s) => {
+    if (s.outcome !== "active" || s.best_tp != null) return false;
+    if (s.current_price == null || s.entry_price <= 0) return true;
+    return Math.abs(s.current_price - s.entry_price) / s.entry_price * 100 > 1.0;
+  }) ?? [];
   const resolved = tracked?.filter((s) => s.outcome !== "active") ?? [];
 
   return (
@@ -473,13 +494,15 @@ function WatchlistTab({
                     </tr>
                   </thead>
                   <tbody>
-                    {/* Running first, then waiting, then resolved */}
-                    {[...running, ...waiting, ...resolved].map((row) => (
+                    {/* Running → Near Entry (pulsing) → Waiting → Resolved */}
+                    {[...running, ...nearEntry, ...waiting, ...resolved].map((row) => (
                       <tr
                         key={row.id}
                         className={`border-t border-neutral-800 hover:bg-neutral-900/40 ${
                           row.outcome === "active" && row.best_tp != null
                             ? "bg-emerald-950/10"
+                            : nearEntry.includes(row)
+                            ? "bg-amber-950/20"
                             : ""
                         }`}
                       >
@@ -488,7 +511,7 @@ function WatchlistTab({
                           {row.side}
                         </td>
                         <td className="px-3 py-2">
-                          <TradeLifecycleBadge signal={row} />
+                          <TradeLifecycleBadge signal={row} currentPrice={row.current_price} />
                         </td>
                         <td className="px-3 py-2 text-right tabular-nums text-neutral-300">
                           {formatPrice(row.entry_price)}
