@@ -93,6 +93,7 @@ export interface Signal {
   atr1h?: number;
   tp1?: number;     // entry + 1.5 × ATR (long) or entry - 1.5 × ATR (short)
   tp2?: number;     // entry + 3.0 × ATR (long) or entry - 3.0 × ATR (short)
+  tp3?: number;     // entry + 5.0 × ATR — swing target (3-5 day hold)
   sl?: number;      // entry - 1.0 × ATR (long) or entry + 1.0 × ATR (short)
   // Relative Strength vs BTC over last 4 × 4H bars
   relativeStrength?: number;  // >1 = outperforming BTC

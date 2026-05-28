@@ -47,6 +47,20 @@ export default function DashboardPage() {
   const [histLoading, setHistLoading] = useState(false);
   const [histErr, setHistErr] = useState<string | null>(null);
 
+  // Watchlist — persisted in localStorage so it survives page refresh
+  const [watched, setWatched] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try { return new Set(JSON.parse(localStorage.getItem("watched") ?? "[]") as string[]); }
+    catch { return new Set(); }
+  });
+
+  async function watchSignal(id: string, holdDays: number) {
+    const next = new Set(watched).add(id);
+    setWatched(next);
+    localStorage.setItem("watched", JSON.stringify([...next]));
+    await fetch("/api/watch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, holdDays }) }).catch(() => {});
+  }
+
   // Filters
   const [tfFilter, setTfFilter] = useState<Set<Timeframe>>(new Set(["15m"]));
   const [sideFilter, setSideFilter] = useState<"all" | "long" | "short">("all");
@@ -264,9 +278,9 @@ export default function DashboardPage() {
 
       <SignalTable
         signals={filtered}
-        regime={
-          data && "regime" in data ? (data.regime as MarketRegime | undefined) : undefined
-        }
+        regime={data && "regime" in data ? (data.regime as MarketRegime | undefined) : undefined}
+        watched={watched}
+        onWatch={watchSignal}
       />
       </>)}
     </main>
@@ -277,6 +291,7 @@ export default function DashboardPage() {
 
 function OutcomeBadge({ outcome }: { outcome: Outcome }) {
   const cfg: Record<Outcome, { label: string; cls: string }> = {
+    tp3:     { label: "TP3 ✓",   cls: "bg-emerald-400   text-neutral-900 border-emerald-300" },
     tp2:     { label: "TP2 ✓",   cls: "bg-emerald-600   text-white border-emerald-500" },
     tp1:     { label: "TP1 ✓",   cls: "bg-emerald-900   text-emerald-300 border-emerald-700" },
     sl:      { label: "SL ✗",    cls: "bg-red-950       text-red-400 border-red-800" },
@@ -305,12 +320,13 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
       <div className="mb-4 flex flex-wrap gap-3 text-sm">
         <StatPill label="Total tracked" value={stats.total.toString()} />
         <StatPill label="Active" value={stats.active.toString()} color="text-blue-300" />
+        <StatPill label="TP3 swing" value={`${stats.tp3} (${stats.tp3Rate}%)`} color="text-cyan-400" />
         <StatPill label="TP2" value={`${stats.tp2} (${stats.tp2Rate}%)`} color="text-emerald-400" />
         <StatPill label="TP1" value={`${stats.tp1} (${stats.tp1Rate}%)`} color="text-emerald-300" />
         <StatPill label="SL"  value={`${stats.sl} (${stats.slRate}%)`}   color="text-red-400" />
         <StatPill label="Expired" value={stats.expired.toString()} color="text-neutral-500" />
         {resolved > 0 && (
-          <StatPill label="Win rate (TP1+TP2)" value={`${Math.round((stats.tp1 + stats.tp2) / resolved * 100)}%`} color="text-amber-300" />
+          <StatPill label="Win rate" value={`${stats.winRate}%`} color="text-amber-300" />
         )}
       </div>
 
@@ -333,6 +349,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
                   <th className="px-3 py-2 font-normal text-right">SL</th>
                   <th className="px-3 py-2 font-normal text-right">TP1</th>
                   <th className="px-3 py-2 font-normal text-right">TP2</th>
+                  <th className="px-3 py-2 font-normal text-right text-cyan-500" title="Swing target: 5× ATR">TP3</th>
                   <th className="px-3 py-2 font-normal text-center">Sqz</th>
                   <th className="px-3 py-2 font-normal">Outcome</th>
                   <th className="px-3 py-2 font-normal text-right" title="Time from signal to outcome">Duration</th>
@@ -352,7 +369,10 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
                       <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums whitespace-nowrap">
                         {new Date(row.bar_time).toISOString().slice(5, 16).replace("T", " ")}
                       </td>
-                      <td className="px-3 py-2 font-medium">{row.symbol}</td>
+                      <td className="px-3 py-2 font-medium">
+                        {row.symbol}
+                        {row.watched && <span className="ml-1 text-amber-300 text-xs" title="Watchlisted">★</span>}
+                      </td>
                       <td className={`px-3 py-2 ${row.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>
                         {row.side}
                       </td>
@@ -369,6 +389,9 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
                       </td>
                       <td className="px-3 py-2 text-right tabular-nums text-emerald-400 text-xs">
                         {row.tp2 ? formatPrice(row.tp2) : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-cyan-400 text-xs">
+                        {row.tp3 ? formatPrice(row.tp3) : "—"}
                       </td>
                       <td className="px-3 py-2 text-center">
                         {row.squeeze_score !== null ? <SqueezeBadge score={row.squeeze_score} /> : <span className="text-neutral-600">—</span>}
@@ -462,7 +485,12 @@ function colFlags(regime?: MarketRegime): ColFlags {
   return                            { showHTF: true,  showSqz: true,  hlHTF: false, hlFR: false, hlLS: false, hlSqz: false };
 }
 
-function SignalTable({ signals, regime }: { signals: Signal[]; regime?: MarketRegime }) {
+function SignalTable({ signals, regime, watched, onWatch }: {
+  signals: Signal[];
+  regime?: MarketRegime;
+  watched: Set<string>;
+  onWatch: (id: string, holdDays: number) => void;
+}) {
   if (signals.length === 0) {
     return (
       <div className="rounded-md border border-neutral-800 bg-neutral-900/40 p-8 text-center text-neutral-500 text-sm">
@@ -507,8 +535,8 @@ function SignalTable({ signals, regime }: { signals: Signal[]; regime?: MarketRe
             {th("Trigger")}
             <th className="px-3 py-2 font-normal text-right" title="Market Profile level touched by the trigger candle wick">Level</th>
             <th className="px-3 py-2 font-normal text-right" title="Close price of the trigger candle">Close</th>
-            <th className="px-3 py-2 font-normal text-right" title="ATR-based targets: SL · TP1 (1.5×ATR) · TP2 (3×ATR)">SL · TP1 · TP2</th>
-            <th className="px-3 py-2 font-normal text-right" title="How long the signal remains actionable">Valid</th>
+            <th className="px-3 py-2 font-normal text-right" title="ATR targets: SL (1×) · TP1 (1.5×) · TP2 (3×) · TP3 cyan (5× swing)">Targets</th>
+            <th className="px-3 py-2 font-normal text-right" title="How long ago the trigger bar closed">Age</th>
             {th("Time")}
             <th className="px-3 py-2 font-normal"></th>
           </tr>
@@ -577,21 +605,26 @@ function SignalTable({ signals, regime }: { signals: Signal[]; regime?: MarketRe
               <td className="px-3 py-2 text-right">
                 <TargetsCell signal={s} />
               </td>
-              <td className="px-3 py-2 text-right text-xs tabular-nums text-amber-300">
-                {formatRemaining(signalExpiresAt(s) - Date.now())}
+              <td className="px-3 py-2 text-right">
+                <AgeBadge barTime={s.barTime} />
               </td>
               <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums">
                 {new Date(s.barTime).toISOString().slice(5, 16).replace("T", " ")}
               </td>
-              <td className="px-3 py-2">
+              <td className="px-3 py-2 whitespace-nowrap">
                 <a href={tradingViewUrl(s)} target="_blank" rel="noopener noreferrer"
                   className="text-xs text-blue-400 hover:text-blue-300" title="Open on TradingView">
                   TV →
                 </a>
                 <a href={binanceFuturesUrl(s.symbol)} target="_blank" rel="noopener noreferrer"
-                  className="ml-3 text-xs text-amber-400 hover:text-amber-300" title="Open Binance Futures chart">
+                  className="ml-2 text-xs text-amber-400 hover:text-amber-300" title="Open Binance Futures chart">
                   BN
                 </a>
+                <WatchButton
+                  id={`${s.symbol}-${s.timeframe}-${s.barTime}`}
+                  isWatched={watched.has(`${s.symbol}-${s.timeframe}-${s.barTime}`)}
+                  onWatch={onWatch}
+                />
               </td>
             </tr>
           ))}
@@ -777,7 +810,71 @@ function TargetsCell({ signal: s }: { signal: Signal }) {
       >
         {formatPrice(s.tp2)}
       </span>
+      {s.tp3 !== undefined && (
+        <>
+          <span className="text-neutral-600">·</span>
+          <span
+            className={isLong ? "text-cyan-400" : "text-violet-400"}
+            title={`TP3: ${formatPrice(s.tp3)} (5× ATR — swing target)`}
+          >
+            {formatPrice(s.tp3)}
+          </span>
+        </>
+      )}
     </span>
+  );
+}
+
+// Age of signal — shows how long ago the trigger bar was, color-coded by freshness.
+function AgeBadge({ barTime }: { barTime: number }) {
+  const ageMs = Date.now() - barTime;
+  const mins  = Math.floor(ageMs / 60_000);
+  const label = mins < 1 ? "< 1m" : `${mins}m`;
+  // fresh → green, aging → amber, near-expiry → red (live window is ~30m)
+  const cls =
+    mins < 10 ? "text-emerald-400" :
+    mins < 22 ? "text-amber-400"   : "text-red-400";
+  return (
+    <span className={`text-xs tabular-nums ${cls}`} title={`Signal triggered ${label} ago`}>
+      {label} ago
+    </span>
+  );
+}
+
+// Watch button — inline hold-period selector that appears on first click.
+function WatchButton({ id, isWatched, onWatch }: {
+  id: string;
+  isWatched: boolean;
+  onWatch: (id: string, holdDays: number) => void;
+}) {
+  const [picking, setPicking] = useState(false);
+  if (isWatched) {
+    return <span className="ml-2 text-xs text-amber-300" title="Signal added to watchlist">★</span>;
+  }
+  if (picking) {
+    return (
+      <span className="ml-2 inline-flex gap-1 text-xs">
+        {([1, 3, 5] as const).map((d) => (
+          <button
+            key={d}
+            onClick={() => { onWatch(id, d); setPicking(false); }}
+            className="px-1.5 py-0.5 rounded bg-amber-900/60 text-amber-300 border border-amber-800/60 hover:bg-amber-800/60"
+          >
+            {d}d
+          </button>
+        ))}
+        <button onClick={() => setPicking(false)} className="px-1 py-0.5 text-neutral-500 hover:text-neutral-300">✕</button>
+      </span>
+    );
+  }
+  return (
+    <button
+      onClick={() => setPicking(true)}
+      className="ml-2 text-xs text-neutral-600 hover:text-amber-300 transition-colors"
+      title="Add to watchlist"
+    >
+      ☆
+    </button>
   );
 }
 

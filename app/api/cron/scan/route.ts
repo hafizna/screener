@@ -116,6 +116,7 @@ export async function GET(req: NextRequest) {
     const entry = signal.barClose;
     const tp1 = atr1h > 0 ? (signal.side === "long" ? entry + 1.5 * atr1h : entry - 1.5 * atr1h) : undefined;
     const tp2 = atr1h > 0 ? (signal.side === "long" ? entry + 3.0 * atr1h : entry - 3.0 * atr1h) : undefined;
+    const tp3 = atr1h > 0 ? (signal.side === "long" ? entry + 5.0 * atr1h : entry - 5.0 * atr1h) : undefined;
     const sl  = atr1h > 0 ? (signal.side === "long" ? entry - 1.0 * atr1h : entry + 1.0 * atr1h) : undefined;
 
     // Relative Strength vs BTC (reuses already-fetched 4H klines)
@@ -147,7 +148,7 @@ export async function GET(req: NextRequest) {
       ...(oiChangePct !== undefined ? { oiChangePct, oiBias } : {}),
       ...(longShortRatio !== undefined ? { longShortRatio, lsBias } : {}),
       signalType,
-      ...(atr1h > 0 ? { atr1h, tp1, tp2, sl } : {}),
+      ...(atr1h > 0 ? { atr1h, tp1, tp2, tp3, sl } : {}),
       ...(relativeStrength !== undefined ? { relativeStrength, rsBias } : {}),
       squeezeScore,
     };
