@@ -1,4 +1,4 @@
-import type { DeltaBias, Kline, MarketProfile, Signal, Timeframe } from "./types";
+import type { DeltaBias, Kline, MarketProfile, Signal, Timeframe, WatchCandidate } from "./types";
 import { buildCurrentAndPreviousDayProfiles } from "./profile";
 import { zScoreLastBar } from "./zscore";
 
@@ -18,6 +18,7 @@ import { zScoreLastBar } from "./zscore";
 export interface DetectSignalsOptions {
   requireExtreme?: boolean;       // if true, need z_lvl == 3 (Pine default false)
   toleranceTicks?: number;        // Pine default 2
+  watchToleranceTicks?: number;   // looser pre-signal watchlist band
   vwapConfluenceTicks?: number;   // extra ranking — bar near VWAP gets flagged
 }
 
@@ -207,5 +208,89 @@ export function detectSignal(
     distanceFromLevel: match.distanceTicks / tickSize,
     takerBuyRatio,
     deltaBias,
+  };
+}
+
+export function detectRecentSignals(
+  symbol: string,
+  timeframe: Timeframe,
+  klines: Kline[],
+  lookbackBars = 8,
+  options: DetectSignalsOptions = {}
+): Signal[] {
+  const out: Signal[] = [];
+  const start = Math.max(0, klines.length - lookbackBars);
+
+  for (let end = start; end < klines.length; end++) {
+    const signal = detectSignal(symbol, timeframe, klines.slice(0, end + 1), options);
+    if (signal) out.push(signal);
+  }
+
+  return out;
+}
+
+export function detectWatchCandidate(
+  symbol: string,
+  timeframe: Timeframe,
+  klines: Kline[],
+  options: DetectSignalsOptions = {}
+): WatchCandidate | null {
+  const toleranceTicks = options.watchToleranceTicks ?? (options.toleranceTicks ?? 2) * 2;
+  if (klines.length < 30) return null;
+
+  const lastBar = klines[klines.length - 1];
+  const z = zScoreLastBar(klines);
+  if (!z) return null;
+
+  const { current, previous } = buildCurrentAndPreviousDayProfiles(klines);
+  if (!current && !previous) return null;
+
+  const tickSize = current?.tickSize ?? previous?.tickSize ?? lastBar.close * 0.0005;
+  const tolerancePrice = toleranceTicks * tickSize;
+
+  const support = nearestSupport(lastBar.low, current, previous, tolerancePrice);
+  const resistance = nearestResistance(lastBar.high, current, previous, tolerancePrice);
+  if (!support && !resistance) return null;
+
+  const useSupport =
+    support !== null &&
+    (resistance === null || support.distanceTicks <= resistance.distanceTicks);
+  const side: Signal["side"] = useSupport ? "long" : "short";
+  const match = useSupport ? support! : resistance!;
+
+  const zPasses = z.level >= 2;
+  const directionPasses =
+    side === "long" ? lastBar.close > lastBar.open : lastBar.close < lastBar.open;
+
+  const missing: string[] = [];
+  const reasons: string[] = [];
+  const distanceFromLevel = match.distanceTicks / tickSize;
+
+  reasons.push(`${distanceFromLevel.toFixed(1)} ticks from ${match.level}`);
+  if (zPasses) reasons.push(z.level === 3 ? "extreme volume" : "large volume");
+  else missing.push("needs large-volume candle");
+
+  if (directionPasses) reasons.push(side === "long" ? "bullish rejection bar" : "bearish rejection bar");
+  else missing.push(side === "long" ? "needs bullish close" : "needs bearish close");
+
+  const state: WatchCandidate["state"] = zPasses && directionPasses ? "near_trigger" : "watch";
+  const proximityScore = Math.max(0, Math.round((toleranceTicks - distanceFromLevel) / toleranceTicks * 2));
+  const score = proximityScore + z.level + (directionPasses ? 1 : 0);
+
+  return {
+    symbol,
+    timeframe,
+    side,
+    state,
+    score,
+    reasons,
+    missing,
+    zLevel: z.level,
+    zScore: z.z,
+    triggerLevel: match.level,
+    triggerPrice: match.price,
+    barTime: lastBar.openTime,
+    barClose: lastBar.close,
+    distanceFromLevel,
   };
 }

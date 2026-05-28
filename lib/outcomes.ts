@@ -24,8 +24,7 @@ export function resolveOutcome(
   signal: Pick<SignalLog, "side" | "entry_price" | "tp1" | "tp2" | "tp3" | "sl">,
   klines: Kline[],
 ): OutcomeResult | null {
-  const { side, tp1, tp2, tp3, sl } = signal;
-  const entry = signal.entry_price;
+  const { side, entry_price: entry, tp1, tp2, tp3, sl } = signal;
   const isLong = side === "long";
 
   let maxFav = 0;

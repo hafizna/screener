@@ -23,12 +23,12 @@ function assert(cond: boolean, msg: string) {
 // Expect: POC near the middle, narrow value area.
 // ─────────────────────────────────────────────────────────────────────────────
 const t1_bars: Kline[] = [
-  // openTime, open, high, low, close, volume
-  { openTime: 0, open: 100, high: 102, low: 100, close: 101, volume: 10, closeTime: 0 },
-  { openTime: 1, open: 101, high: 102, low: 100.5, close: 101, volume: 10, closeTime: 1 },
-  { openTime: 2, open: 101, high: 101.5, low: 100.5, close: 101, volume: 10, closeTime: 2 },
-  { openTime: 3, open: 101, high: 101.5, low: 100.8, close: 101.2, volume: 10, closeTime: 3 },
-  { openTime: 4, open: 101.2, high: 101.8, low: 101, close: 101.5, volume: 10, closeTime: 4 },
+  // openTime, open, high, low, close, volume, closeTime, takerBuyVolume
+  { openTime: 0, open: 100, high: 102, low: 100, close: 101, volume: 10, closeTime: 0, takerBuyVolume: 5 },
+  { openTime: 1, open: 101, high: 102, low: 100.5, close: 101, volume: 10, closeTime: 1, takerBuyVolume: 5 },
+  { openTime: 2, open: 101, high: 101.5, low: 100.5, close: 101, volume: 10, closeTime: 2, takerBuyVolume: 5 },
+  { openTime: 3, open: 101, high: 101.5, low: 100.8, close: 101.2, volume: 10, closeTime: 3, takerBuyVolume: 5 },
+  { openTime: 4, open: 101.2, high: 101.8, low: 101, close: 101.5, volume: 10, closeTime: 4, takerBuyVolume: 5 },
 ];
 const p1 = buildProfile(t1_bars, 0.1);
 assert(p1 !== null, "T1: profile built");
@@ -61,9 +61,9 @@ assert(val <= 3 && vah >= 3, "T2: POC inside VA");
 // ─────────────────────────────────────────────────────────────────────────────
 const t3_bars: Kline[] = [];
 for (let i = 0; i < 24; i++) {
-  t3_bars.push({ openTime: i, open: 100, high: 101, low: 99, close: 100.5, volume: 10 + (i % 2), closeTime: i });
+  t3_bars.push({ openTime: i, open: 100, high: 101, low: 99, close: 100.5, volume: 10 + (i % 2), closeTime: i, takerBuyVolume: 5 });
 }
-t3_bars.push({ openTime: 24, open: 100, high: 101, low: 99, close: 100.5, volume: 50, closeTime: 24 });
+t3_bars.push({ openTime: 24, open: 100, high: 101, low: 99, close: 100.5, volume: 50, closeTime: 24, takerBuyVolume: 25 });
 const z = zScoreAt(t3_bars, 24);
 assert(z !== null, "T3: z computed");
 if (z) {
@@ -80,7 +80,7 @@ if (z) {
 // So row 5 should be touched, row 4 should NOT be (low not < rowMax = 100.5).
 // ─────────────────────────────────────────────────────────────────────────────
 const t4_bars: Kline[] = [
-  { openTime: 0, open: 100.5, high: 100.5, low: 100.5, close: 100.5, volume: 1, closeTime: 0 },
+  { openTime: 0, open: 100.5, high: 100.5, low: 100.5, close: 100.5, volume: 1, closeTime: 0, takerBuyVolume: 0 },
 ];
 const p4 = buildProfile(t4_bars, 0.1);
 if (p4) {

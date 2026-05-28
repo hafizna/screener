@@ -14,6 +14,18 @@ export type FRBias = "favorable" | "neutral" | "unfavorable";
 // Whether the trigger bar's taker buy pressure aligns with the signal direction.
 export type DeltaBias = "aligned" | "neutral" | "opposed";
 
+// Global long/short account positioning for a symbol.
+export type LsBias = "crowded_shorts" | "balanced" | "crowded_longs";
+
+// High-level market regime derived from BTC 4H price action + FR.
+export type MarketRegime = "flush" | "neutral" | "breakout";
+
+// What kind of setup the signal represents given the current regime.
+export type SignalType = "bounce" | "continuation" | "standard";
+
+export type WatchState = "watch" | "near_trigger";
+export type BiasWindow = "1-2d" | "3-5d" | "5-7d";
+
 export interface Kline {
   openTime: number;   // ms
   open: number;
@@ -75,6 +87,54 @@ export interface Signal {
   // Rising OI = new money entering the market (confirms either direction).
   oiChangePct?: number;
   oiBias?: "rising" | "flat" | "falling";
+  // Global long/short account ratio at signal time.
+  longShortRatio?: number;  // > 1 = more longs, < 1 = more shorts
+  lsBias?: LsBias;
+  // What kind of setup this is given the current market regime.
+  signalType?: SignalType;
+  // ATR-based targets (from 1H klines, 14-period SMA ATR)
+  atr1h?: number;
+  tp1?: number;     // entry + 1.5 × ATR (long) or entry - 1.5 × ATR (short)
+  tp2?: number;     // entry + 3.0 × ATR (long) or entry - 3.0 × ATR (short)
+  tp3?: number;     // entry + 5.0 × ATR — swing target (3-5 day hold)
+  sl?: number;      // entry - 1.0 × ATR (long) or entry + 1.0 × ATR (short)
+  // Relative Strength vs BTC over last 4 × 4H bars
+  relativeStrength?: number;  // >1 = outperforming BTC
+  rsBias?: "strong" | "neutral" | "weak";
+  // Bounce quality composite (0–6)
+  squeezeScore?: number;
+}
+
+export interface WatchCandidate {
+  symbol: string;
+  timeframe: Timeframe;
+  side: SignalSide;
+  state: WatchState;
+  score: number;
+  biasWindow?: BiasWindow;
+  reasons: string[];
+  missing: string[];
+  zLevel: ZLevel;
+  zScore: number;
+  bias4h?: BiasSide;
+  bias1h?: BiasSide;
+  biasScore4h?: number;
+  biasScore1h?: number;
+  triggerLevel: Signal["triggerLevel"];
+  triggerPrice: number;
+  barTime: number;
+  barClose: number;
+  distanceFromLevel: number;
+  fundingRate?: number;
+  frBias?: FRBias;
+  oiChangePct?: number;
+  oiBias?: "rising" | "flat" | "falling";
+  longShortRatio?: number;
+  lsBias?: LsBias;
+  signalType?: SignalType;
+  relativeStrength?: number;
+  rsBias?: "strong" | "neutral" | "weak";
+  squeezeScore?: number;
 }
 
 export interface ScanResult {
@@ -83,4 +143,9 @@ export interface ScanResult {
   symbolsScanned: number;
   symbolsErrored: string[];
   signals: Signal[];
+  // Market regime at scan time, derived from BTC 4H + FR.
+  regime?: MarketRegime;
+  regimeSummary?: string;
+  recentWindowBars?: number;
+  watchlist?: WatchCandidate[];
 }

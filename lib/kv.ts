@@ -27,9 +27,6 @@ export async function storeScanResult(result: ScanResult): Promise<void> {
   const r = getRedis();
   // Single key, overwritten each scan. Upstash JSON-encodes for us.
   await r.set(LATEST_SCAN_KEY, result);
-  // Also keep a tiny history ring (last 5 scans) for debugging.
-  const histKey = `mpz:scan:hist:${result.scannedAt}`;
-  await r.set(histKey, { scannedAt: result.scannedAt, count: result.signals.length, durationMs: result.durationMs }, { ex: 60 * 60 * 24 });
 }
 
 export async function loadLatestScan(): Promise<ScanResult | null> {
