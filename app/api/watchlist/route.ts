@@ -1,9 +1,20 @@
 import { NextResponse } from "next/server";
 import { getWatchedSignals } from "@/lib/db";
+import { fetchMarkPrices } from "@/lib/binance";
 
 export const dynamic = "force-dynamic";
 
 export async function GET() {
-  const signals = await getWatchedSignals();
-  return NextResponse.json({ signals });
+  const [signals, prices] = await Promise.all([
+    getWatchedSignals(),
+    fetchMarkPrices().catch(() => new Map<string, number>()),
+  ]);
+
+  // Attach current mark price to each signal so the frontend can show Near Entry state
+  const signalsWithPrice = signals.map((s) => ({
+    ...s,
+    current_price: prices.get(s.symbol) ?? null,
+  }));
+
+  return NextResponse.json({ signals: signalsWithPrice });
 }
