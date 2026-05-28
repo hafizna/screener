@@ -13,6 +13,8 @@ import type { FRBias, LsBias, MarketRegime, Signal, SignalType, ScanResult } fro
 import { analyzeBias } from "@/lib/bias";
 import { detectSignal } from "@/lib/signals";
 import { storeScanResult } from "@/lib/kv";
+import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, expireOldSignals } from "@/lib/db";
+import { resolveOutcome } from "@/lib/outcomes";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
@@ -195,13 +197,59 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ...scanResult, kvError: (e as Error).message }, { status: 200 });
   }
 
+  // 7. Persist new signals + check outcomes for active ones.
+  //    Both are non-fatal — DB being down must not break the live scan.
+  let dbSignalsInserted = 0;
+  let dbOutcomesResolved = 0;
+  try {
+    await ensureSchema();
+
+    // 7a. Insert new signals (ON CONFLICT DO NOTHING, so re-runs are safe)
+    await Promise.all(signals.map((s) => insertSignal(s, scanResult.scannedAt, regime)));
+    dbSignalsInserted = signals.length;
+
+    // 7b. Expire stale active signals (> 24h old, no level hit)
+    await expireOldSignals();
+
+    // 7c. Resolve outcomes for active signals
+    const active = await getActiveSignals();
+    if (active.length > 0) {
+      // Fetch klines only for symbols that have active signals (de-duped)
+      const symbolsToCheck = [...new Set(active.map((s) => s.symbol))];
+      const klinesMap = new Map<string, Awaited<ReturnType<typeof fetchKlines>>>();
+      await Promise.all(
+        symbolsToCheck.map(async (sym) => {
+          const k = await fetchKlines(sym, "15m").catch(() => null);
+          if (k) klinesMap.set(sym, k);
+        })
+      );
+
+      await Promise.all(
+        active.map(async (row) => {
+          const klines = klinesMap.get(row.symbol);
+          if (!klines) return;
+          // Only consider bars that came after this signal's bar
+          const afterSignal = klines.filter((k) => k.openTime > row.bar_time);
+          const result = resolveOutcome(row, afterSignal);
+          if (!result) return;
+          await updateOutcome(row.id, result.outcome, result.outcomeAt, result.outcomePrice, result.maxFavorable, result.maxAdverse);
+          dbOutcomesResolved++;
+        })
+      );
+    }
+  } catch (e) {
+    console.error("DB write failed", e);
+  }
+
   return NextResponse.json({
     scannedAt:      scanResult.scannedAt,
-    durationMs:     scanResult.durationMs,
+    durationMs:     Date.now() - t0,
     symbolsScanned: scanResult.symbolsScanned,
     signalsFound:   scanResult.signals.length,
     errors:         scanResult.symbolsErrored.length,
     regime:         scanResult.regime,
+    dbSignalsInserted,
+    dbOutcomesResolved,
   });
 }
 

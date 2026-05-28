@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { DeltaBias, FRBias, LsBias, MarketRegime, ScanResult, Signal, SignalType, Timeframe } from "@/lib/types";
+import type { HistoryResult, SignalLog, Outcome } from "@/lib/db";
 
 type ApiResponse = (ScanResult & { stale: boolean; ageMs: number }) | {
   scannedAt: null;
@@ -34,9 +35,17 @@ function confluenceScore(s: Signal): number {
 }
 
 export default function DashboardPage() {
+  const [tab, setTab] = useState<"live" | "history">("live");
+
+  // ── Live tab state ──────────────────────────────────────────────────────────
   const [data, setData] = useState<ApiResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
+
+  // ── History tab state ───────────────────────────────────────────────────────
+  const [history, setHistory] = useState<HistoryResult | null>(null);
+  const [histLoading, setHistLoading] = useState(false);
+  const [histErr, setHistErr] = useState<string | null>(null);
 
   // Filters
   const [tfFilter, setTfFilter] = useState<Set<Timeframe>>(new Set(["15m"]));
@@ -61,12 +70,31 @@ export default function DashboardPage() {
     }
   }
 
+  async function loadHistory() {
+    setHistLoading(true);
+    setHistErr(null);
+    try {
+      const res = await fetch("/api/history", { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setHistory((await res.json()) as HistoryResult);
+    } catch (e) {
+      setHistErr((e as Error).message);
+    } finally {
+      setHistLoading(false);
+    }
+  }
+
   useEffect(() => {
     refresh();
-    // Auto-refresh every 60s — cheap, just hits our /api/signals (KV read).
     const id = setInterval(refresh, 60_000);
     return () => clearInterval(id);
   }, []);
+
+  // Load history when user switches to the History tab (lazy — don't fetch until needed)
+  useEffect(() => {
+    if (tab === "history" && !history && !histLoading) loadHistory();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
 
   // When regime changes, nudge filters to match the playbook automatically.
   // User can still override; this just saves them from manually switching every time.
@@ -110,18 +138,49 @@ export default function DashboardPage() {
 
   return (
     <main className="min-h-screen bg-neutral-950 text-neutral-100 px-3 py-4 sm:px-6 sm:py-6">
-      <header className="mb-6 flex items-center justify-between">
+      <header className="mb-5 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-medium">MP + Z screener</h1>
           <p className="text-sm text-neutral-400">Binance USDT-M futures · top by volume</p>
         </div>
-        <button
-          onClick={refresh}
-          className="px-3 py-1.5 text-sm rounded-md border border-neutral-700 hover:border-neutral-500 transition-colors"
-        >
-          {loading ? "Refreshing…" : "Refresh"}
-        </button>
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-md border border-neutral-700 overflow-hidden text-sm">
+            <button
+              onClick={() => setTab("live")}
+              className={`px-3 py-1.5 transition-colors ${tab === "live" ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-200"}`}
+            >
+              Live
+            </button>
+            <button
+              onClick={() => setTab("history")}
+              className={`px-3 py-1.5 transition-colors border-l border-neutral-700 ${tab === "history" ? "bg-neutral-100 text-neutral-900" : "text-neutral-400 hover:text-neutral-200"}`}
+            >
+              History
+            </button>
+          </div>
+          {tab === "live" && (
+            <button
+              onClick={refresh}
+              className="px-3 py-1.5 text-sm rounded-md border border-neutral-700 hover:border-neutral-500 transition-colors"
+            >
+              {loading ? "Refreshing…" : "Refresh"}
+            </button>
+          )}
+          {tab === "history" && (
+            <button
+              onClick={loadHistory}
+              className="px-3 py-1.5 text-sm rounded-md border border-neutral-700 hover:border-neutral-500 transition-colors"
+            >
+              {histLoading ? "Loading…" : "Reload"}
+            </button>
+          )}
+        </div>
       </header>
+
+      {tab === "history" && (
+        <HistoryTab history={history} loading={histLoading} err={histErr} />
+      )}
+      {tab !== "history" && (<>
 
       {data && data.scannedAt !== null && (
         <>
@@ -209,8 +268,148 @@ export default function DashboardPage() {
           data && "regime" in data ? (data.regime as MarketRegime | undefined) : undefined
         }
       />
+      </>)}
     </main>
   );
+}
+
+// ─── History Tab ──────────────────────────────────────────────────────────────
+
+function OutcomeBadge({ outcome }: { outcome: Outcome }) {
+  const cfg: Record<Outcome, { label: string; cls: string }> = {
+    tp2:     { label: "TP2 ✓",   cls: "bg-emerald-600   text-white border-emerald-500" },
+    tp1:     { label: "TP1 ✓",   cls: "bg-emerald-900   text-emerald-300 border-emerald-700" },
+    sl:      { label: "SL ✗",    cls: "bg-red-950       text-red-400 border-red-800" },
+    expired: { label: "Expired", cls: "bg-neutral-800   text-neutral-500 border-neutral-700" },
+    active:  { label: "Active",  cls: "bg-blue-950      text-blue-300 border-blue-800" },
+  };
+  const { label, cls } = cfg[outcome] ?? cfg.active;
+  return (
+    <span className={`inline-flex px-1.5 py-0.5 text-xs rounded border tabular-nums ${cls}`}>
+      {label}
+    </span>
+  );
+}
+
+function HistoryTab({ history, loading, err }: { history: HistoryResult | null; loading: boolean; err: string | null }) {
+  if (loading) return <div className="text-neutral-500 text-sm py-12 text-center">Loading signal history…</div>;
+  if (err)     return <div className="text-red-400 text-sm py-4">Error: {err}</div>;
+  if (!history) return null;
+
+  const { signals, stats } = history;
+  const resolved = stats.tp2 + stats.tp1 + stats.sl + stats.expired;
+
+  return (
+    <div>
+      {/* Stats bar */}
+      <div className="mb-4 flex flex-wrap gap-3 text-sm">
+        <StatPill label="Total tracked" value={stats.total.toString()} />
+        <StatPill label="Active" value={stats.active.toString()} color="text-blue-300" />
+        <StatPill label="TP2" value={`${stats.tp2} (${stats.tp2Rate}%)`} color="text-emerald-400" />
+        <StatPill label="TP1" value={`${stats.tp1} (${stats.tp1Rate}%)`} color="text-emerald-300" />
+        <StatPill label="SL"  value={`${stats.sl} (${stats.slRate}%)`}   color="text-red-400" />
+        <StatPill label="Expired" value={stats.expired.toString()} color="text-neutral-500" />
+        {resolved > 0 && (
+          <StatPill label="Win rate (TP1+TP2)" value={`${Math.round((stats.tp1 + stats.tp2) / resolved * 100)}%`} color="text-amber-300" />
+        )}
+      </div>
+
+      {signals.length === 0 ? (
+        <div className="rounded-md border border-neutral-800 bg-neutral-900/40 p-8 text-center text-neutral-500 text-sm">
+          No signals tracked yet — history builds up after the next cron scan.
+        </div>
+      ) : (
+        <div className="rounded-md border border-neutral-800 overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm min-w-[900px]">
+              <thead className="bg-neutral-900 text-neutral-400 text-left">
+                <tr>
+                  <th className="px-3 py-2 font-normal">Time</th>
+                  <th className="px-3 py-2 font-normal">Symbol</th>
+                  <th className="px-3 py-2 font-normal">Side</th>
+                  <th className="px-3 py-2 font-normal">Regime</th>
+                  <th className="px-3 py-2 font-normal">Type</th>
+                  <th className="px-3 py-2 font-normal text-right">Entry</th>
+                  <th className="px-3 py-2 font-normal text-right">SL</th>
+                  <th className="px-3 py-2 font-normal text-right">TP1</th>
+                  <th className="px-3 py-2 font-normal text-right">TP2</th>
+                  <th className="px-3 py-2 font-normal text-center">Sqz</th>
+                  <th className="px-3 py-2 font-normal">Outcome</th>
+                  <th className="px-3 py-2 font-normal text-right" title="Time from signal to outcome">Duration</th>
+                  <th className="px-3 py-2 font-normal text-right" title="Best price move in direction of trade (Maximum Favorable Excursion)">MFE</th>
+                  <th className="px-3 py-2 font-normal text-right" title="Worst price move against trade (Maximum Adverse Excursion)">MAE</th>
+                </tr>
+              </thead>
+              <tbody>
+                {signals.map((row) => {
+                  const durationMs = row.outcome_at ? row.outcome_at - row.bar_time : null;
+                  const mfe = row.max_favorable && row.entry_price
+                    ? Math.abs(row.max_favorable) / row.entry_price * 100 : null;
+                  const mae = row.max_adverse && row.entry_price
+                    ? Math.abs(row.max_adverse)   / row.entry_price * 100 : null;
+                  return (
+                    <tr key={row.id} className="border-t border-neutral-800 hover:bg-neutral-900/40">
+                      <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums whitespace-nowrap">
+                        {new Date(row.bar_time).toISOString().slice(5, 16).replace("T", " ")}
+                      </td>
+                      <td className="px-3 py-2 font-medium">{row.symbol}</td>
+                      <td className={`px-3 py-2 ${row.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>
+                        {row.side}
+                      </td>
+                      <td className="px-3 py-2 text-xs text-neutral-400">{row.regime ?? "—"}</td>
+                      <td className="px-3 py-2">
+                        <SignalTypeBadge type={row.signal_type as SignalType | undefined} />
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatPrice(row.entry_price)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-red-400 text-xs">
+                        {row.sl ? formatPrice(row.sl) : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-emerald-300 text-xs">
+                        {row.tp1 ? formatPrice(row.tp1) : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-emerald-400 text-xs">
+                        {row.tp2 ? formatPrice(row.tp2) : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        {row.squeeze_score !== null ? <SqueezeBadge score={row.squeeze_score} /> : <span className="text-neutral-600">—</span>}
+                      </td>
+                      <td className="px-3 py-2">
+                        <OutcomeBadge outcome={row.outcome} />
+                      </td>
+                      <td className="px-3 py-2 text-right text-xs tabular-nums text-neutral-400">
+                        {durationMs ? formatDuration(durationMs) : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-right text-xs tabular-nums text-emerald-400">
+                        {mfe !== null ? `+${mfe.toFixed(2)}%` : "—"}
+                      </td>
+                      <td className="px-3 py-2 text-right text-xs tabular-nums text-red-400">
+                        {mae !== null ? `−${mae.toFixed(2)}%` : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StatPill({ label, value, color = "text-neutral-200" }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="px-3 py-1.5 rounded-md bg-neutral-900 border border-neutral-800">
+      <span className="text-neutral-500 text-xs">{label} </span>
+      <span className={`font-medium ${color}`}>{value}</span>
+    </div>
+  );
+}
+
+function formatDuration(ms: number): string {
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
 function FilterGroup({ label, children }: { label: string; children: React.ReactNode }) {
