@@ -24,6 +24,7 @@ export type MarketRegime = "flush" | "neutral" | "breakout";
 export type SignalType = "bounce" | "continuation" | "standard";
 
 export type WatchState = "watch" | "near_trigger";
+export type BiasWindow = "1-2d" | "3-5d" | "5-7d";
 
 export interface Kline {
   openTime: number;   // ms
@@ -109,6 +110,7 @@ export interface WatchCandidate {
   side: SignalSide;
   state: WatchState;
   score: number;
+  biasWindow?: BiasWindow;
   reasons: string[];
   missing: string[];
   zLevel: ZLevel;

@@ -9,7 +9,7 @@ import {
 } from "@/lib/binance";
 import { detectBTCRegime } from "@/lib/regime";
 import { computeATR, computeRS, computeSqueezeScore } from "@/lib/atr";
-import type { FRBias, LsBias, MarketRegime, Signal, SignalType, ScanResult, WatchCandidate } from "@/lib/types";
+import type { BiasWindow, FRBias, LsBias, MarketRegime, Signal, SignalType, ScanResult, WatchCandidate } from "@/lib/types";
 import { analyzeBias } from "@/lib/bias";
 import { detectRecentSignals, detectWatchCandidate } from "@/lib/signals";
 import { storeScanResult } from "@/lib/kv";
@@ -347,10 +347,20 @@ function enrichWatchCandidate(
   if ((watch.side === "long" && ctx.rsBias === "strong") || (watch.side === "short" && ctx.rsBias === "weak")) score += 1;
   if ((watch.side === "long" && ctx.rsBias === "weak") || (watch.side === "short" && ctx.rsBias === "strong")) score -= 1;
   score += Math.min(2, Math.floor(squeezeScore / 3));
+  const biasWindow = estimateBiasWindow(watch, {
+    fr: ctx.fr,
+    longShortRatio: ctx.longShortRatio,
+    lsBias: ctx.lsBias,
+    squeezeScore,
+    oiBias: ctx.oiBias,
+    rsBias: ctx.rsBias,
+  });
+  reasons.push(`${biasWindow} bias window`);
 
   return {
     ...watch,
     score,
+    biasWindow,
     reasons,
     missing,
     bias1h: ctx.bias1h.bias,
@@ -364,6 +374,41 @@ function enrichWatchCandidate(
     ...(ctx.relativeStrength !== undefined ? { relativeStrength: ctx.relativeStrength, rsBias: ctx.rsBias } : {}),
     squeezeScore,
   };
+}
+
+function estimateBiasWindow(
+  watch: WatchCandidate,
+  ctx: {
+    fr?: number;
+    longShortRatio?: number;
+    lsBias?: LsBias;
+    squeezeScore: number;
+    oiBias?: "rising" | "flat" | "falling";
+    rsBias?: Signal["rsBias"];
+  }
+): BiasWindow {
+  const favoredLs = watch.side === "long" ? "crowded_shorts" : "crowded_longs";
+  const extremeLs =
+    ctx.longShortRatio !== undefined &&
+    (watch.side === "long" ? ctx.longShortRatio < 0.85 : ctx.longShortRatio > 1.3);
+  const elevatedFunding = ctx.fr !== undefined && Math.abs(ctx.fr) >= 0.001;
+  const alignedRs =
+    (watch.side === "long" && ctx.rsBias === "strong") ||
+    (watch.side === "short" && ctx.rsBias === "weak");
+
+  if (
+    ctx.squeezeScore >= 4 ||
+    (ctx.lsBias === favoredLs && (elevatedFunding || ctx.oiBias === "rising" || alignedRs)) ||
+    (extremeLs && elevatedFunding)
+  ) {
+    return "5-7d";
+  }
+
+  if (watch.state === "near_trigger" || ctx.squeezeScore >= 2 || ctx.oiBias === "rising") {
+    return "3-5d";
+  }
+
+  return "1-2d";
 }
 
 function passesBiasConfirmation(

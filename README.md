@@ -19,7 +19,7 @@ This mirrors the `long_signal` / `short_signal` lines of `market_profile_tpo_v6_
 ## How to read the dashboard
 
 - **Entry**: actionable MP+Z triggers from the latest scan. The cron replays the last `RECENT_SIGNAL_BARS` closed candles and the UI still hides expired entries.
-- **Watchlist**: pre-signal alts that are near profile levels but may still need volume, candle direction, or bias confirmation.
+- **Watchlist**: pre-signal alts that are near profile levels but may still need volume, candle direction, or bias confirmation. `Window` is a bias observation window, not an entry validity timer.
 - **History**: persisted Neon outcome tracking for triggered signals.
 - **TF**: candle timeframe that produced the signal.
 - **Side**: long means a bullish rejection from support-like levels; short means a bearish rejection from resistance-like levels.

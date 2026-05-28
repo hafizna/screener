@@ -312,6 +312,7 @@ function WatchlistTab({ candidates, loading }: { candidates: WatchCandidate[]; l
               <th className="px-3 py-2 font-normal">Score</th>
               <th className="px-3 py-2 font-normal">Symbol</th>
               <th className="px-3 py-2 font-normal">State</th>
+              <th className="px-3 py-2 font-normal">Window</th>
               <th className="px-3 py-2 font-normal">Side</th>
               <th className="px-3 py-2 font-normal">HTF bias</th>
               <th className="px-3 py-2 font-normal">Z</th>
@@ -337,6 +338,7 @@ function WatchlistTab({ candidates, loading }: { candidates: WatchCandidate[]; l
                     {row.state === "near_trigger" ? "near" : "watch"}
                   </span>
                 </td>
+                <td className="px-3 py-2 text-xs text-neutral-300 tabular-nums">{row.biasWindow ?? "1-2d"}</td>
                 <td className={`px-3 py-2 ${row.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>{row.side}</td>
                 <td className="px-3 py-2 text-xs text-neutral-400">4H {row.bias4h ?? "-"} / 1H {row.bias1h ?? "-"}</td>
                 <td className="px-3 py-2"><ZBadge level={row.zLevel} z={row.zScore} /></td>
