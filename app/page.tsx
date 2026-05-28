@@ -24,6 +24,14 @@ type HistoryFilter = Outcome | "all";
 type HistoryConfidenceFilter = "all" | "high" | "medium" | "low";
 type MainTab = "radar" | "entry" | "tracked" | "history";
 type EntrySourceFilter = "all" | "radar";
+type EntryViabilityFilter = "viable" | "all";
+type EntryViabilityStatus = "viable" | "late" | "invalid" | "unknown";
+
+interface EntryViability {
+  status: EntryViabilityStatus;
+  label: string;
+  detail: string;
+}
 
 // Confluence score: each of the 6 factors contributes ±1.
 // Range: −6 (everything opposed) to +6 (everything aligned).
@@ -80,6 +88,7 @@ export default function DashboardPage() {
   const [frFilter, setFrFilter] = useState<"all" | "favorable">("all");
   const [minScore, setMinScore] = useState<number>(0);
   const [typeFilter, setTypeFilter] = useState<"all" | "bounce" | "continuation">("all");
+  const [entryViabilityFilter, setEntryViabilityFilter] = useState<EntryViabilityFilter>("viable");
 
   async function refresh() {
     setLoading(true);
@@ -179,9 +188,14 @@ export default function DashboardPage() {
     entrySourceFilter === "radar" ? radarSignals : activeSignals,
   [activeSignals, radarSignals, entrySourceFilter]);
 
+  const viableSignalCount = useMemo(() =>
+    signalPool.filter(isEntryViable).length,
+  [signalPool]);
+
   const filtered = useMemo<Signal[]>(() => {
     if (signalPool.length === 0) return [];
     return signalPool.filter((s) => {
+      if (entryViabilityFilter === "viable" && !isEntryViable(s)) return false;
       if (!tfFilter.has(s.timeframe)) return false;
       if (sideFilter !== "all" && s.side !== sideFilter) return false;
       if (s.zLevel < minZ) return false;
@@ -190,7 +204,7 @@ export default function DashboardPage() {
       if (typeFilter !== "all" && s.signalType !== typeFilter) return false;
       return true;
     });
-  }, [signalPool, tfFilter, sideFilter, minZ, frFilter, minScore, typeFilter]);
+  }, [signalPool, entryViabilityFilter, tfFilter, sideFilter, minZ, frFilter, minScore, typeFilter]);
 
   // ── Guide modal ─────────────────────────────────────────────────────────────
   const [showGuide, setShowGuide] = useState(false);
@@ -368,8 +382,17 @@ export default function DashboardPage() {
           <Chip active={typeFilter === "bounce"}       onClick={() => setTypeFilter("bounce")}>Bounce</Chip>
           <Chip active={typeFilter === "continuation"} onClick={() => setTypeFilter("continuation")}>Cont.</Chip>
         </FilterGroup>
+        <FilterGroup label="Entry">
+          <Chip active={entryViabilityFilter === "viable"} onClick={() => setEntryViabilityFilter("viable")}>
+            Viable
+          </Chip>
+          <Chip active={entryViabilityFilter === "all"} onClick={() => setEntryViabilityFilter("all")}>
+            All
+          </Chip>
+        </FilterGroup>
         <div className="ml-auto flex items-center gap-3 text-sm text-neutral-400">
           {filtered.length} signal{filtered.length === 1 ? "" : "s"}
+          <span className="text-xs text-neutral-600">{viableSignalCount}/{signalPool.length} viable</span>
           {radarSignals.length > 0 && (
             <button
               onClick={() => setEntrySourceFilter((v) => v === "all" ? "radar" : "all")}
@@ -1062,7 +1085,7 @@ function SignalTable({ signals, regime, watched, onWatch }: {
   return (
     <div className="rounded-md border border-neutral-800 overflow-hidden">
       <div className="overflow-x-auto">
-      <table className="w-full text-sm min-w-[1200px]">
+      <table className="w-full text-sm min-w-[1360px]">
         <thead className="bg-neutral-900 text-neutral-400 text-left">
           <tr>
             {th("Score", "Confluence score: HTF4H + HTF1H + FR + Delta + OI + L/S + RS, each ±1.")}
@@ -1083,7 +1106,9 @@ function SignalTable({ signals, regime, watched, onWatch }: {
             {th("Conf")}
             {th("Trigger")}
             <th className="px-3 py-2 font-normal text-right" title="Market Profile level touched by the trigger candle wick">Level</th>
-            <th className="px-3 py-2 font-normal text-right" title="Close price of the trigger candle">Close</th>
+            <th className="px-3 py-2 font-normal text-right" title="Close price of the trigger candle; used as planned entry">Entry</th>
+            <th className="px-3 py-2 font-normal text-right" title="Current mark price">Now</th>
+            {th("State", "Entry viability from current mark price versus entry, SL, and TP1.")}
             <th className="px-3 py-2 font-normal text-right" title="ATR targets: SL (1×) · TP1 (1.5×) · TP2 (3×) · TP3 cyan (5× swing)">Targets</th>
             <th className="px-3 py-2 font-normal text-right" title="How long ago the trigger bar closed">Age</th>
             {th("Time")}
@@ -1091,11 +1116,13 @@ function SignalTable({ signals, regime, watched, onWatch }: {
           </tr>
         </thead>
         <tbody>
-          {signals.map((s, i) => (
-            <tr
-              key={`${s.symbol}-${s.timeframe}-${s.barTime}-${i}`}
-              className={`border-t border-neutral-800 hover:bg-neutral-900/40 ${s.fromWatchlist ? "bg-amber-950/10" : ""}`}
-            >
+          {signals.map((s, i) => {
+            const viability = entryViability(s);
+            return (
+              <tr
+                key={`${s.symbol}-${s.timeframe}-${s.barTime}-${i}`}
+                className={`border-t border-neutral-800 hover:bg-neutral-900/40 ${s.fromWatchlist ? "bg-amber-950/10" : ""}`}
+              >
               <td className="px-3 py-2">
                 <ScoreBadge score={confluenceScore(s)} />
               </td>
@@ -1156,6 +1183,12 @@ function SignalTable({ signals, regime, watched, onWatch }: {
                 {formatPrice(s.triggerPrice)}
               </td>
               <td className="px-3 py-2 text-right tabular-nums">{formatPrice(s.barClose)}</td>
+              <td className="px-3 py-2 text-right tabular-nums text-neutral-400">
+                {s.currentPrice !== undefined ? formatPrice(s.currentPrice) : "—"}
+              </td>
+              <td className="px-3 py-2">
+                <EntryViabilityBadge viability={viability} />
+              </td>
               <td className="px-3 py-2 text-right">
                 <TargetsCell signal={s} />
               </td>
@@ -1181,7 +1214,8 @@ function SignalTable({ signals, regime, watched, onWatch }: {
                 />
               </td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
       </div>
@@ -1209,6 +1243,67 @@ function isSignalActive(signal: Signal, now: number): boolean {
 
 function signalExpiresAt(signal: Signal): number {
   return signal.barTime + TIMEFRAME_MS[signal.timeframe] * 2;
+}
+
+function entryViability(signal: Signal): EntryViability {
+  const entry = signal.barClose;
+  const current = signal.currentPrice;
+  if (!current || !Number.isFinite(current) || entry <= 0) {
+    return { status: "unknown", label: "no mark", detail: "Current mark price unavailable" };
+  }
+
+  const isLong = signal.side === "long";
+  if (signal.sl !== undefined && (isLong ? current <= signal.sl : current >= signal.sl)) {
+    return { status: "invalid", label: "SL crossed", detail: "Current mark price has crossed the planned stop" };
+  }
+  if (signal.tp1 !== undefined && (isLong ? current >= signal.tp1 : current <= signal.tp1)) {
+    return { status: "late", label: "TP1 hit", detail: "Fresh entry is late because TP1 has already been reached" };
+  }
+
+  const atr =
+    signal.atr1h ??
+    (signal.sl !== undefined ? Math.abs(entry - signal.sl) : undefined) ??
+    (signal.tp1 !== undefined ? Math.abs(signal.tp1 - entry) / 1.5 : undefined);
+  const favorableMove = isLong ? current - entry : entry - current;
+  const adverseMove = -favorableMove;
+  const distancePct = Math.abs(current - entry) / entry * 100;
+
+  if (atr && atr > 0) {
+    const favorableAtr = favorableMove / atr;
+    const adverseAtr = adverseMove / atr;
+    if (favorableAtr > 0.5) {
+      return {
+        status: "late",
+        label: "chasing",
+        detail: `Moved ${favorableAtr.toFixed(2)} ATR toward target`,
+      };
+    }
+    if (adverseAtr > 0.75) {
+      return {
+        status: "invalid",
+        label: "near SL",
+        detail: `Moved ${adverseAtr.toFixed(2)} ATR against entry`,
+      };
+    }
+    return {
+      status: "viable",
+      label: favorableMove < 0 ? "better px" : "viable",
+      detail: `${distancePct.toFixed(2)}% from planned entry`,
+    };
+  }
+
+  if (distancePct <= 0.75) {
+    return { status: "viable", label: "viable", detail: `${distancePct.toFixed(2)}% from planned entry` };
+  }
+  return {
+    status: favorableMove > 0 ? "late" : "invalid",
+    label: favorableMove > 0 ? "chasing" : "drifted",
+    detail: `${distancePct.toFixed(2)}% from planned entry`,
+  };
+}
+
+function isEntryViable(signal: Signal): boolean {
+  return entryViability(signal).status === "viable";
 }
 
 function formatBias(signal: Signal): string {
@@ -1261,6 +1356,19 @@ function SignalTypeBadge({ type }: { type?: SignalType }) {
   const label = type === "bounce" ? "bounce" : "cont.";
   return (
     <span className={`px-1.5 py-0.5 text-xs rounded border ${styles}`}>{label}</span>
+  );
+}
+
+function EntryViabilityBadge({ viability }: { viability: EntryViability }) {
+  const styles =
+    viability.status === "viable"  ? "bg-emerald-950/70 text-emerald-300 border-emerald-800/70" :
+    viability.status === "late"    ? "bg-amber-950/70 text-amber-300 border-amber-800/70" :
+    viability.status === "invalid" ? "bg-red-950/70 text-red-300 border-red-800/70" :
+                                      "bg-neutral-900 text-neutral-500 border-neutral-700";
+  return (
+    <span className={`inline-flex px-1.5 py-0.5 text-xs rounded border whitespace-nowrap ${styles}`} title={viability.detail}>
+      {viability.label}
+    </span>
   );
 }
 
@@ -1532,7 +1640,7 @@ function GuideModal({ onClose }: { onClose: () => void }) {
                   </div>
                   <p className="text-xs text-neutral-500">
                     {tab === "Radar" && "Pre-entry candidates near Market Profile levels. They show a provisional ATR trade plan before a z-score entry fires."}
-                    {tab === "Entry" && "Signals that already fired. Defaults to all active signals, with a Radar-sourced filter for candidates that were seen before firing."}
+                    {tab === "Entry" && "Signals that already fired and are still viable at current mark price. Toggle to audit late/invalid active signals."}
                     {tab === "Tracked" && "All active signals are monitored here automatically. Starred signals remain visible as manual bookmarks."}
                     {tab === "History" && "Resolved signals only: TP1/TP2/TP3, SL, or expiry. Win-rate stats do not include active trades."}
                   </p>

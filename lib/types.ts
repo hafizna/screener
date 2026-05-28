@@ -70,6 +70,8 @@ export interface Signal {
   barClose: number;
   barHigh: number;
   barLow: number;
+  // Current mark price attached by /api/signals for entry viability checks.
+  currentPrice?: number;
   // Confluence flags — for ranking / filtering on the dashboard
   nearVwap: boolean;
   nearWeeklyVwap: boolean;
