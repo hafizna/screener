@@ -102,6 +102,53 @@ export interface SignalLog {
   max_adverse: number | null;
 }
 
+function toNumber(value: unknown, fallback = 0): number {
+  if (typeof value === "number") return Number.isFinite(value) ? value : fallback;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function toNullableNumber(value: unknown): number | null {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function toOutcome(value: unknown): Outcome {
+  return value === "tp1" || value === "tp2" || value === "sl" || value === "expired" || value === "active"
+    ? value
+    : "active";
+}
+
+function normalizeSignalLog(row: unknown): SignalLog {
+  const r = row as Record<string, unknown>;
+  return {
+    id: String(r.id ?? ""),
+    symbol: String(r.symbol ?? ""),
+    timeframe: String(r.timeframe ?? ""),
+    side: r.side === "short" ? "short" : "long",
+    signal_type: r.signal_type == null ? null : String(r.signal_type),
+    regime: r.regime == null ? null : String(r.regime),
+    entry_price: toNumber(r.entry_price),
+    tp1: toNullableNumber(r.tp1),
+    tp2: toNullableNumber(r.tp2),
+    sl: toNullableNumber(r.sl),
+    trigger_level: String(r.trigger_level ?? ""),
+    z_level: toNumber(r.z_level),
+    z_score: toNumber(r.z_score),
+    squeeze_score: toNullableNumber(r.squeeze_score),
+    funding_rate: toNullableNumber(r.funding_rate),
+    long_short_ratio: toNullableNumber(r.long_short_ratio),
+    bar_time: toNumber(r.bar_time),
+    scanned_at: toNumber(r.scanned_at),
+    outcome: toOutcome(r.outcome),
+    outcome_at: toNullableNumber(r.outcome_at),
+    outcome_price: toNullableNumber(r.outcome_price),
+    max_favorable: toNullableNumber(r.max_favorable),
+    max_adverse: toNullableNumber(r.max_adverse),
+  };
+}
+
 // ─── Outcome check helpers ────────────────────────────────────────────────────
 // Returns all active signals older than 1 bar (bar_time < now - 15m).
 // We skip the most recent bar since it hasn't had time to develop yet.
@@ -114,7 +161,7 @@ export async function getActiveSignals(): Promise<SignalLog[]> {
     WHERE outcome = 'active' AND bar_time < ${cutoff}
     ORDER BY bar_time ASC
   `;
-  return rows as unknown as SignalLog[];
+  return rows.map(normalizeSignalLog);
 }
 
 export async function updateOutcome(
@@ -167,6 +214,7 @@ export interface HistoryResult {
 export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
   const sql = getDb();
   if (!sql) return { signals: [], stats: { total: 0, active: 0, tp2: 0, tp1: 0, sl: 0, expired: 0, tp2Rate: 0, tp1Rate: 0, slRate: 0 } };
+  await ensureSchema();
 
   const [rows, counts] = await Promise.all([
     sql`SELECT * FROM signal_log ORDER BY bar_time DESC LIMIT ${limit}` as Promise<unknown[]>,
@@ -178,7 +226,7 @@ export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
   ]);
 
   const cm = Object.fromEntries(
-    (counts as Array<{ outcome: string; n: number }>).map((r) => [r.outcome, r.n])
+    (counts as Array<{ outcome: string; n: unknown }>).map((r) => [r.outcome, toNumber(r.n)])
   );
   const tp2 = cm["tp2"] ?? 0;
   const tp1 = cm["tp1"] ?? 0;
@@ -187,7 +235,7 @@ export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
   const resolved = tp2 + tp1 + sl + exp;
 
   return {
-    signals: rows as unknown as SignalLog[],
+    signals: rows.map(normalizeSignalLog),
     stats: {
       total:   (cm["active"] ?? 0) + resolved,
       active:  cm["active"] ?? 0,
