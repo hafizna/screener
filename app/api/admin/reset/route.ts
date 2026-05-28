@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { neon } from "@neondatabase/serverless";
+import { ensureSchema } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
@@ -15,6 +16,7 @@ export async function POST(req: NextRequest) {
   const url = process.env.DATABASE_URL;
   if (!url) return NextResponse.json({ error: "no DATABASE_URL" }, { status: 500 });
 
+  await ensureSchema();
   const sql = neon(url);
   const rows = await sql`DELETE FROM signal_log RETURNING id` as Array<{ id: string }>;
 

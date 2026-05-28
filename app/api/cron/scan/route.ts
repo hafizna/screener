@@ -257,12 +257,13 @@ export async function GET(req: NextRequest) {
   let dbSignalsInserted = 0;
   let dbOutcomesResolved = 0;
   let dbSignalsPruned = 0;
+  let dbError: string | undefined;
   try {
     await ensureSchema();
 
     // 7a. Insert new signals (ON CONFLICT DO NOTHING, so re-runs are safe)
-    await Promise.all(signals.map((s) => insertSignal(s, scanResult.scannedAt, regime)));
-    dbSignalsInserted = signals.length;
+    const inserted = await Promise.all(signals.map((s) => insertSignal(s, scanResult.scannedAt, regime)));
+    dbSignalsInserted = inserted.filter(Boolean).length;
 
     // 7b. Expire stale active signals (> 24h old, no level hit)
     await expireOldSignals();
@@ -303,6 +304,7 @@ export async function GET(req: NextRequest) {
     // 7d. Retention cleanup to keep DB storage bounded.
     dbSignalsPruned = await pruneOldSignals();
   } catch (e) {
+    dbError = (e as Error).message;
     console.error("DB write failed", e);
   }
 
@@ -318,6 +320,7 @@ export async function GET(req: NextRequest) {
     dbSignalsInserted,
     dbOutcomesResolved,
     dbSignalsPruned,
+    ...(dbError ? { dbError } : {}),
   });
 }
 

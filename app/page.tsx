@@ -66,6 +66,7 @@ export default function DashboardPage() {
   type TrackedSignal = SignalLog & { current_price: number | null };
   const [trackedSignals, setTrackedSignals] = useState<TrackedSignal[] | null>(null);
   const [trackedLoading, setTrackedLoading] = useState(false);
+  const [trackedErr, setTrackedErr] = useState<string | null>(null);
 
   // Starred ids are persisted in localStorage so the button state survives refresh.
   const [watched, setWatched] = useState<Set<string>>(() => {
@@ -121,10 +122,17 @@ export default function DashboardPage() {
 
   async function loadTrackedSignals() {
     setTrackedLoading(true);
+    setTrackedErr(null);
     try {
       const res = await fetch("/api/watchlist", { cache: "no-store" });
-      if (res.ok) setTrackedSignals(((await res.json()) as { signals: TrackedSignal[] }).signals);
-    } catch { /* non-fatal */ }
+      if (!res.ok) {
+        const body = await res.json().catch(() => null) as { error?: string } | null;
+        throw new Error(body?.error ?? `HTTP ${res.status}`);
+      }
+      setTrackedSignals(((await res.json()) as { signals: TrackedSignal[] }).signals);
+    } catch (e) {
+      setTrackedErr((e as Error).message);
+    }
     finally { setTrackedLoading(false); }
   }
 
@@ -331,6 +339,7 @@ export default function DashboardPage() {
           loading={loading}
           tracked={null}
           trackedLoading={false}
+          trackedErr={null}
           onReloadTracked={loadTrackedSignals}
         />
       )}
@@ -342,6 +351,7 @@ export default function DashboardPage() {
           loading={false}
           tracked={trackedSignals}
           trackedLoading={trackedLoading}
+          trackedErr={trackedErr}
           onReloadTracked={loadTrackedSignals}
         />
       )}
@@ -479,6 +489,7 @@ function WatchlistTab({
   loading,
   tracked,
   trackedLoading,
+  trackedErr,
   onReloadTracked,
 }: {
   mode: "radar" | "tracked";
@@ -486,6 +497,7 @@ function WatchlistTab({
   loading: boolean;
   tracked: (SignalLog & { current_price: number | null })[] | null;
   trackedLoading: boolean;
+  trackedErr: string | null;
   onReloadTracked: () => void;
 }) {
   const [sortKey, setSortKey] = useState<WatchSortKey>("score");
@@ -559,7 +571,13 @@ function WatchlistTab({
             <div className="text-neutral-600 text-sm py-4 text-center">Loading…</div>
           )}
 
-          {!trackedLoading && tracked === null && (
+          {trackedErr && (
+            <div className="rounded-md border border-red-900/60 bg-red-950/30 p-4 text-center text-red-300 text-sm">
+              Tracked failed to load: {trackedErr}
+            </div>
+          )}
+
+          {!trackedLoading && !trackedErr && tracked === null && (
             <div className="text-neutral-600 text-sm py-4 text-center">No tracked data loaded yet.</div>
           )}
 

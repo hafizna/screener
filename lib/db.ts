@@ -50,6 +50,25 @@ export async function ensureSchema() {
     )
   `;
   // Migrations for existing tables
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS signal_type TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS regime TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS tp1 REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS tp2 REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS tp3 REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS sl REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS trigger_level TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS z_level INTEGER`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS z_score REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS squeeze_score INTEGER`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS funding_rate REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS long_short_ratio REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS outcome TEXT NOT NULL DEFAULT 'active'`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS outcome_at BIGINT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS outcome_price REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS max_favorable REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS max_adverse REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS watched BOOLEAN NOT NULL DEFAULT FALSE`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS watch_expires_at BIGINT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS best_tp TEXT`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_outcome  ON signal_log(outcome)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_bar_time ON signal_log(bar_time DESC)`;
@@ -57,10 +76,10 @@ export async function ensureSchema() {
 }
 
 // ─── Write path ───────────────────────────────────────────────────────────────
-export async function insertSignal(s: Signal, scannedAt: number, regime?: string) {
+export async function insertSignal(s: Signal, scannedAt: number, regime?: string): Promise<boolean> {
   const sql = getDb();
-  if (!sql) return;
-  await sql`
+  if (!sql) return false;
+  const rows = await sql`
     INSERT INTO signal_log
       (id, symbol, timeframe, side, signal_type, regime, entry_price,
        tp1, tp2, tp3, sl, trigger_level, z_level, z_score, squeeze_score,
@@ -77,7 +96,9 @@ export async function insertSignal(s: Signal, scannedAt: number, regime?: string
       ${s.barTime}, ${scannedAt}
     )
     ON CONFLICT (id) DO NOTHING
-  `;
+    RETURNING id
+  ` as Array<{ id: string }>;
+  return rows.length > 0;
 }
 
 // ─── Watchlist ─────────────────────────────────────────────────────────────────
