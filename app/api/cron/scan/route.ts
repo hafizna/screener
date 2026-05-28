@@ -13,7 +13,7 @@ import type { BiasWindow, FRBias, LsBias, MarketRegime, Signal, SignalType, Scan
 import { analyzeBias } from "@/lib/bias";
 import { detectRecentSignals, detectWatchCandidate } from "@/lib/signals";
 import { storeScanResult } from "@/lib/kv";
-import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, expireOldSignals, pruneOldSignals } from "@/lib/db";
+import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, updateBestTP, expireOldSignals, pruneOldSignals } from "@/lib/db";
 import { resolveOutcome } from "@/lib/outcomes";
 
 export const maxDuration = 60;
@@ -266,8 +266,14 @@ export async function GET(req: NextRequest) {
           const afterSignal = klines.filter((k) => k.openTime > row.bar_time);
           const result = resolveOutcome(row, afterSignal);
           if (!result) return;
-          await updateOutcome(row.id, result.outcome, result.outcomeAt, result.outcomePrice, result.maxFavorable, result.maxAdverse);
-          dbOutcomesResolved++;
+          if (result.terminal) {
+            // SL hit or TP3 hit — finalize the outcome, stop re-checking
+            await updateOutcome(row.id, result.outcome, result.outcomeAt, result.outcomePrice, result.maxFavorable, result.maxAdverse);
+            dbOutcomesResolved++;
+          } else {
+            // TP1 or TP2 reached but still running — record progress, keep active
+            await updateBestTP(row.id, result.outcome);
+          }
         })
       );
     }

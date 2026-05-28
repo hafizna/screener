@@ -52,6 +52,10 @@ export default function DashboardPage() {
   const [histLoading, setHistLoading] = useState(false);
   const [histErr, setHistErr] = useState<string | null>(null);
 
+  // ── Watchlist (tracked signals from DB) ──────────────────────────────────────
+  const [trackedSignals, setTrackedSignals] = useState<SignalLog[] | null>(null);
+  const [trackedLoading, setTrackedLoading] = useState(false);
+
   // Watchlist — persisted in localStorage so it survives page refresh
   const [watched, setWatched] = useState<Set<string>>(() => {
     if (typeof window === "undefined") return new Set();
@@ -103,6 +107,15 @@ export default function DashboardPage() {
     }
   }
 
+  async function loadTrackedSignals() {
+    setTrackedLoading(true);
+    try {
+      const res = await fetch("/api/watchlist", { cache: "no-store" });
+      if (res.ok) setTrackedSignals(((await res.json()) as { signals: SignalLog[] }).signals);
+    } catch { /* non-fatal */ }
+    finally { setTrackedLoading(false); }
+  }
+
   useEffect(() => {
     refresh();
     const id = setInterval(refresh, 60_000);
@@ -112,6 +125,12 @@ export default function DashboardPage() {
   // Load history when user switches to the History tab (lazy — don't fetch until needed)
   useEffect(() => {
     if (tab === "history" && !history && !histLoading) loadHistory();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  // Load tracked signals from DB when user switches to Watchlist tab
+  useEffect(() => {
+    if (tab === "watchlist") loadTrackedSignals();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -245,7 +264,13 @@ export default function DashboardPage() {
       )}
 
       {tab === "watchlist" && (
-        <WatchlistTab candidates={watchlist} loading={loading} />
+        <WatchlistTab
+          candidates={watchlist}
+          loading={loading}
+          tracked={trackedSignals}
+          trackedLoading={trackedLoading}
+          onReloadTracked={loadTrackedSignals}
+        />
       )}
 
       {tab === "live" && (<>
@@ -312,7 +337,44 @@ export default function DashboardPage() {
 
 // ─── History Tab ──────────────────────────────────────────────────────────────
 
-function WatchlistTab({ candidates, loading }: { candidates: WatchCandidate[]; loading: boolean }) {
+function TradeLifecycleBadge({ signal }: { signal: SignalLog }) {
+  if (signal.outcome !== "active") {
+    return <OutcomeBadge outcome={signal.outcome} />;
+  }
+  if (signal.best_tp === "tp2") {
+    return (
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border bg-emerald-600 text-white border-emerald-500">
+        TP2 ✓ Running →TP3
+      </span>
+    );
+  }
+  if (signal.best_tp === "tp1") {
+    return (
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border bg-emerald-900 text-emerald-300 border-emerald-700">
+        TP1 ✓ Running →TP2
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border bg-neutral-900 text-neutral-400 border-neutral-700">
+      Waiting
+    </span>
+  );
+}
+
+function WatchlistTab({
+  candidates,
+  loading,
+  tracked,
+  trackedLoading,
+  onReloadTracked,
+}: {
+  candidates: WatchCandidate[];
+  loading: boolean;
+  tracked: SignalLog[] | null;
+  trackedLoading: boolean;
+  onReloadTracked: () => void;
+}) {
   const [sortKey, setSortKey] = useState<WatchSortKey>("score");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const sorted = useMemo(() => {
@@ -348,90 +410,199 @@ function WatchlistTab({ candidates, loading }: { candidates: WatchCandidate[]; l
   const sortLabel = (label: string, key: WatchSortKey) =>
     `${label}${sortKey === key ? (sortDir === "asc" ? " ↑" : " ↓") : ""}`;
 
-  if (loading) return <div className="text-neutral-500 text-sm py-12 text-center">Refreshing watchlist...</div>;
-  if (candidates.length === 0) {
-    return (
-      <div className="rounded-md border border-neutral-800 bg-neutral-900/40 p-8 text-center text-neutral-500 text-sm">
-        No near setups in the latest scan.
-      </div>
-    );
-  }
+  // Split tracked signals by lifecycle state
+  const running  = tracked?.filter((s) => s.outcome === "active" && s.best_tp != null) ?? [];
+  const waiting  = tracked?.filter((s) => s.outcome === "active" && s.best_tp == null) ?? [];
+  const resolved = tracked?.filter((s) => s.outcome !== "active") ?? [];
 
   return (
-    <div className="rounded-md border border-neutral-800 overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm min-w-[1180px]">
-          <thead className="bg-neutral-900 text-neutral-400 text-left">
-            <tr>
-              <th className="px-3 py-2 font-normal"><button onClick={() => setSort("score")}>{sortLabel("Score", "score")}</button></th>
-              <th className="px-3 py-2 font-normal"><button onClick={() => setSort("symbol")}>{sortLabel("Symbol", "symbol")}</button></th>
-              <th className="px-3 py-2 font-normal">State</th>
-              <th className="px-3 py-2 font-normal"><button onClick={() => setSort("window")}>{sortLabel("Window", "window")}</button></th>
-              <th className="px-3 py-2 font-normal"><button onClick={() => setSort("side")}>{sortLabel("Side", "side")}</button></th>
-              <th className="px-3 py-2 font-normal">HTF bias</th>
-              <th className="px-3 py-2 font-normal"><button onClick={() => setSort("z")}>{sortLabel("Z", "z")}</button></th>
-              <th className="px-3 py-2 font-normal text-right">Level</th>
-              <th className="px-3 py-2 font-normal text-right">Close</th>
-              <th className="px-3 py-2 font-normal text-right">FR</th>
-              <th className="px-3 py-2 font-normal text-right">L/S</th>
-              <th className="px-3 py-2 font-normal text-right">OI</th>
-              <th className="px-3 py-2 font-normal text-right">RS</th>
-              <th className="px-3 py-2 font-normal text-center"><button onClick={() => setSort("squeeze")}>{sortLabel("Sqz", "squeeze")}</button></th>
-              <th className="px-3 py-2 font-normal">Ready / Missing</th>
-              <th className="px-3 py-2 font-normal"><button onClick={() => setSort("time")}>{sortLabel("Time", "time")}</button></th>
-              <th className="px-3 py-2 font-normal"></th>
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map((row) => (
-              <tr key={`${row.symbol}-${row.side}-${row.barTime}`} className="border-t border-neutral-800 hover:bg-neutral-900/40">
-                <td className="px-3 py-2"><ScoreBadge score={row.score} /></td>
-                <td className="px-3 py-2 font-medium">{row.symbol}</td>
-                <td className="px-3 py-2">
-                  <span className={`px-1.5 py-0.5 text-xs rounded border ${row.state === "near_trigger" ? "bg-amber-950/70 text-amber-300 border-amber-700/60" : "bg-neutral-900 text-neutral-400 border-neutral-700"}`}>
-                    {row.state === "near_trigger" ? "near" : "watch"}
-                  </span>
-                </td>
-                <td className="px-3 py-2 text-xs text-neutral-300 tabular-nums">{row.biasWindow ?? "1-2d"}</td>
-                <td className={`px-3 py-2 ${row.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>{row.side}</td>
-                <td className="px-3 py-2 text-xs text-neutral-400">4H {row.bias4h ?? "-"} / 1H {row.bias1h ?? "-"}</td>
-                <td className="px-3 py-2"><ZBadge level={row.zLevel} z={row.zScore} /></td>
-                <td className="px-3 py-2 text-right text-xs tabular-nums">
-                  <span className="text-neutral-300">{row.triggerLevel}</span>{" "}
-                  <span className="text-neutral-500">{formatPrice(row.triggerPrice)}</span>
-                </td>
-                <td className="px-3 py-2 text-right tabular-nums">{formatPrice(row.barClose)}</td>
-                <td className="px-3 py-2 text-right">
-                  {row.fundingRate !== undefined ? <FRBadge rate={row.fundingRate} bias={row.frBias} /> : <span className="text-neutral-600">-</span>}
-                </td>
-                <td className="px-3 py-2 text-right">
-                  {row.longShortRatio !== undefined ? <LSBadge ratio={row.longShortRatio} bias={row.lsBias} /> : <span className="text-neutral-600">-</span>}
-                </td>
-                <td className="px-3 py-2 text-right">
-                  {row.oiChangePct !== undefined ? <OIBadge changePct={row.oiChangePct} bias={row.oiBias} /> : <span className="text-neutral-600">-</span>}
-                </td>
-                <td className="px-3 py-2 text-right">
-                  {row.relativeStrength !== undefined ? <RSBadge rs={row.relativeStrength} bias={row.rsBias} side={row.side} /> : <span className="text-neutral-600">-</span>}
-                </td>
-                <td className="px-3 py-2 text-center">
-                  {row.squeezeScore !== undefined ? <SqueezeBadge score={row.squeezeScore} /> : <span className="text-neutral-600">-</span>}
-                </td>
-                <td className="px-3 py-2 text-xs">
-                  <div className="text-neutral-300">{row.reasons.slice(0, 2).join(" | ")}</div>
-                  {row.missing.length > 0 && <div className="text-amber-400">{row.missing.slice(0, 2).join(" | ")}</div>}
-                </td>
-                <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums">
-                  {new Date(row.barTime).toISOString().slice(5, 16).replace("T", " ")}
-                </td>
-                <td className="px-3 py-2 whitespace-nowrap">
-                  <a href={tradingViewSymbolUrl(row.symbol, row.timeframe)} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300">TV</a>
-                  <a href={binanceFuturesUrl(row.symbol)} target="_blank" rel="noopener noreferrer" className="ml-3 text-xs text-amber-400 hover:text-amber-300">BN</a>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+    <div className="space-y-6">
+      {/* ── My Tracked Signals (from DB) ──────────────────────────────────── */}
+      {(tracked !== null || trackedLoading) && (
+        <section>
+          <div className="flex items-center justify-between mb-2">
+            <h2 className="text-sm font-medium text-neutral-300">
+              My Tracked Signals
+              {tracked && ` · ${tracked.length} total`}
+            </h2>
+            <button
+              onClick={onReloadTracked}
+              className="text-xs text-neutral-500 hover:text-neutral-300 transition-colors"
+            >
+              {trackedLoading ? "Loading…" : "Reload"}
+            </button>
+          </div>
+
+          {trackedLoading && !tracked && (
+            <div className="text-neutral-600 text-sm py-4 text-center">Loading…</div>
+          )}
+
+          {tracked !== null && tracked.length === 0 && (
+            <div className="rounded-md border border-neutral-800 bg-neutral-900/20 p-6 text-center text-neutral-600 text-sm">
+              No tracked signals yet. Star a signal on the Entry tab to track it.
+            </div>
+          )}
+
+          {tracked !== null && tracked.length > 0 && (
+            <div className="rounded-md border border-neutral-800 overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm min-w-[720px]">
+                  <thead className="bg-neutral-900 text-neutral-400 text-left">
+                    <tr>
+                      <th className="px-3 py-2 font-normal">Symbol</th>
+                      <th className="px-3 py-2 font-normal">Side</th>
+                      <th className="px-3 py-2 font-normal">Status</th>
+                      <th className="px-3 py-2 font-normal text-right">Entry</th>
+                      <th className="px-3 py-2 font-normal text-right">TP1</th>
+                      <th className="px-3 py-2 font-normal text-right">TP2</th>
+                      <th className="px-3 py-2 font-normal text-right">TP3</th>
+                      <th className="px-3 py-2 font-normal text-right">SL</th>
+                      <th className="px-3 py-2 font-normal">Age</th>
+                      <th className="px-3 py-2 font-normal"></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {/* Running first, then waiting, then resolved */}
+                    {[...running, ...waiting, ...resolved].map((row) => (
+                      <tr
+                        key={row.id}
+                        className={`border-t border-neutral-800 hover:bg-neutral-900/40 ${
+                          row.outcome === "active" && row.best_tp != null
+                            ? "bg-emerald-950/10"
+                            : ""
+                        }`}
+                      >
+                        <td className="px-3 py-2 font-medium">{row.symbol}</td>
+                        <td className={`px-3 py-2 ${row.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>
+                          {row.side}
+                        </td>
+                        <td className="px-3 py-2">
+                          <TradeLifecycleBadge signal={row} />
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-neutral-300">
+                          {formatPrice(row.entry_price)}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-neutral-500">
+                          {row.tp1 != null ? formatPrice(row.tp1) : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-neutral-500">
+                          {row.tp2 != null ? formatPrice(row.tp2) : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-cyan-600">
+                          {row.tp3 != null ? formatPrice(row.tp3) : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums text-neutral-500">
+                          {row.sl != null ? formatPrice(row.sl) : "—"}
+                        </td>
+                        <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums">
+                          {new Date(row.bar_time).toISOString().slice(5, 16).replace("T", " ")}
+                        </td>
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          <a href={tradingViewSymbolUrl(row.symbol, row.timeframe as import("@/lib/types").Timeframe)} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300">TV</a>
+                          <a href={binanceFuturesUrl(row.symbol)} target="_blank" rel="noopener noreferrer" className="ml-3 text-xs text-amber-400 hover:text-amber-300">BN</a>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* ── Near Setups (auto-detected from current scan) ─────────────────── */}
+      <section>
+        <h2 className="text-sm font-medium text-neutral-300 mb-2">
+          Near Setups
+          {candidates.length > 0 && ` · ${candidates.length} detected`}
+        </h2>
+        {loading && (
+          <div className="text-neutral-500 text-sm py-8 text-center">Refreshing…</div>
+        )}
+        {!loading && candidates.length === 0 && (
+          <div className="rounded-md border border-neutral-800 bg-neutral-900/20 p-6 text-center text-neutral-600 text-sm">
+            No near setups in the latest scan.
+          </div>
+        )}
+        {!loading && candidates.length > 0 && (
+          <div className="rounded-md border border-neutral-800 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm min-w-[1180px]">
+                <thead className="bg-neutral-900 text-neutral-400 text-left">
+                  <tr>
+                    <th className="px-3 py-2 font-normal"><button onClick={() => setSort("score")}>{sortLabel("Score", "score")}</button></th>
+                    <th className="px-3 py-2 font-normal"><button onClick={() => setSort("symbol")}>{sortLabel("Symbol", "symbol")}</button></th>
+                    <th className="px-3 py-2 font-normal">State</th>
+                    <th className="px-3 py-2 font-normal"><button onClick={() => setSort("window")}>{sortLabel("Window", "window")}</button></th>
+                    <th className="px-3 py-2 font-normal"><button onClick={() => setSort("side")}>{sortLabel("Side", "side")}</button></th>
+                    <th className="px-3 py-2 font-normal">HTF bias</th>
+                    <th className="px-3 py-2 font-normal"><button onClick={() => setSort("z")}>{sortLabel("Z", "z")}</button></th>
+                    <th className="px-3 py-2 font-normal text-right">Level</th>
+                    <th className="px-3 py-2 font-normal text-right">Close</th>
+                    <th className="px-3 py-2 font-normal text-right">FR</th>
+                    <th className="px-3 py-2 font-normal text-right">L/S</th>
+                    <th className="px-3 py-2 font-normal text-right">OI</th>
+                    <th className="px-3 py-2 font-normal text-right">RS</th>
+                    <th className="px-3 py-2 font-normal text-center"><button onClick={() => setSort("squeeze")}>{sortLabel("Sqz", "squeeze")}</button></th>
+                    <th className="px-3 py-2 font-normal">Ready / Missing</th>
+                    <th className="px-3 py-2 font-normal"><button onClick={() => setSort("time")}>{sortLabel("Time", "time")}</button></th>
+                    <th className="px-3 py-2 font-normal"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sorted.map((row) => (
+                    <tr key={`${row.symbol}-${row.side}-${row.barTime}`} className="border-t border-neutral-800 hover:bg-neutral-900/40">
+                      <td className="px-3 py-2"><ScoreBadge score={row.score} /></td>
+                      <td className="px-3 py-2 font-medium">{row.symbol}</td>
+                      <td className="px-3 py-2">
+                        <span className={`px-1.5 py-0.5 text-xs rounded border ${row.state === "near_trigger" ? "bg-amber-950/70 text-amber-300 border-amber-700/60" : "bg-neutral-900 text-neutral-400 border-neutral-700"}`}>
+                          {row.state === "near_trigger" ? "near" : "watch"}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 text-xs text-neutral-300 tabular-nums">{row.biasWindow ?? "1-2d"}</td>
+                      <td className={`px-3 py-2 ${row.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>{row.side}</td>
+                      <td className="px-3 py-2 text-xs text-neutral-400">4H {row.bias4h ?? "-"} / 1H {row.bias1h ?? "-"}</td>
+                      <td className="px-3 py-2"><ZBadge level={row.zLevel} z={row.zScore} /></td>
+                      <td className="px-3 py-2 text-right text-xs tabular-nums">
+                        <span className="text-neutral-300">{row.triggerLevel}</span>{" "}
+                        <span className="text-neutral-500">{formatPrice(row.triggerPrice)}</span>
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">{formatPrice(row.barClose)}</td>
+                      <td className="px-3 py-2 text-right">
+                        {row.fundingRate !== undefined ? <FRBadge rate={row.fundingRate} bias={row.frBias} /> : <span className="text-neutral-600">-</span>}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {row.longShortRatio !== undefined ? <LSBadge ratio={row.longShortRatio} bias={row.lsBias} /> : <span className="text-neutral-600">-</span>}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {row.oiChangePct !== undefined ? <OIBadge changePct={row.oiChangePct} bias={row.oiBias} /> : <span className="text-neutral-600">-</span>}
+                      </td>
+                      <td className="px-3 py-2 text-right">
+                        {row.relativeStrength !== undefined ? <RSBadge rs={row.relativeStrength} bias={row.rsBias} side={row.side} /> : <span className="text-neutral-600">-</span>}
+                      </td>
+                      <td className="px-3 py-2 text-center">
+                        {row.squeezeScore !== undefined ? <SqueezeBadge score={row.squeezeScore} /> : <span className="text-neutral-600">-</span>}
+                      </td>
+                      <td className="px-3 py-2 text-xs">
+                        <div className="text-neutral-300">{row.reasons.slice(0, 2).join(" | ")}</div>
+                        {row.missing.length > 0 && <div className="text-amber-400">{row.missing.slice(0, 2).join(" | ")}</div>}
+                      </td>
+                      <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums">
+                        {new Date(row.barTime).toISOString().slice(5, 16).replace("T", " ")}
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        <a href={tradingViewSymbolUrl(row.symbol, row.timeframe)} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300">TV</a>
+                        <a href={binanceFuturesUrl(row.symbol)} target="_blank" rel="noopener noreferrer" className="ml-3 text-xs text-amber-400 hover:text-amber-300">BN</a>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </section>
     </div>
   );
 }

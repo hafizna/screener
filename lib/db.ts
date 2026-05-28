@@ -44,9 +44,13 @@ export async function ensureSchema() {
       max_adverse      REAL,
       -- watchlist fields
       watched          BOOLEAN NOT NULL DEFAULT FALSE,
-      watch_expires_at BIGINT
+      watch_expires_at BIGINT,
+      -- lifecycle tracking: highest TP reached while signal is still active
+      best_tp          TEXT
     )
   `;
+  // Migrations for existing tables
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS best_tp TEXT`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_outcome  ON signal_log(outcome)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_bar_time ON signal_log(bar_time DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_symbol   ON signal_log(symbol)`;
@@ -118,6 +122,7 @@ export interface SignalLog {
   max_adverse: number | null;
   watched: boolean;
   watch_expires_at: number | null;
+  best_tp: string | null;
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -167,6 +172,7 @@ function normalizeSignalLog(row: unknown): SignalLog {
     max_adverse: toNullableNumber(r.max_adverse),
     watched: Boolean(r.watched),
     watch_expires_at: toNullableNumber(r.watch_expires_at),
+    best_tp: r.best_tp == null ? null : String(r.best_tp),
   };
 }
 
@@ -202,16 +208,24 @@ export async function updateOutcome(
   `;
 }
 
+// Update best_tp without finalizing the outcome — signal stays "active" for re-checking.
+export async function updateBestTP(id: string, bestTP: string) {
+  const sql = getDb();
+  if (!sql) return;
+  await sql`UPDATE signal_log SET best_tp = ${bestTP} WHERE id = ${id} AND outcome = 'active'`;
+}
+
 // Expire non-watched signals after 72h, watched signals after their custom window.
 export async function expireOldSignals() {
   const sql = getDb();
   if (!sql) return;
   const cutoff72h = Date.now() - 72 * 60 * 60_000;
   const now = Date.now();
-  // Regular (unwatched) signals: expire after 72h
+  // Regular (unwatched) signals: expire after 72h.
+  // If best_tp was set (TP1/TP2 hit while running), lock in that outcome instead of "expired".
   await sql`
     UPDATE signal_log
-    SET outcome = 'expired', outcome_at = ${now}
+    SET outcome = COALESCE(best_tp, 'expired'), outcome_at = ${now}
     WHERE outcome = 'active'
       AND watched = FALSE
       AND bar_time < ${cutoff72h}
@@ -219,7 +233,7 @@ export async function expireOldSignals() {
   // Watched signals: expire when their custom watch window closes
   await sql`
     UPDATE signal_log
-    SET outcome = 'expired', outcome_at = ${now}
+    SET outcome = COALESCE(best_tp, 'expired'), outcome_at = ${now}
     WHERE outcome = 'active'
       AND watched = TRUE
       AND watch_expires_at IS NOT NULL
@@ -239,6 +253,19 @@ export async function pruneOldSignals(): Promise<number> {
     RETURNING id
   ` as Array<{ id: string }>;
   return rows.length;
+}
+
+// Returns all signals the user has bookmarked (watched=TRUE), including resolved ones.
+export async function getWatchedSignals(): Promise<SignalLog[]> {
+  const sql = getDb();
+  if (!sql) return [];
+  const rows = await sql`
+    SELECT * FROM signal_log
+    WHERE watched = TRUE
+    ORDER BY bar_time DESC
+    LIMIT 50
+  ` as unknown[];
+  return (rows as unknown[]).map(normalizeSignalLog);
 }
 
 // ─── Read path ────────────────────────────────────────────────────────────────
