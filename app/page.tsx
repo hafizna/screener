@@ -20,7 +20,7 @@ const TIMEFRAME_MS: Record<Timeframe, number> = {
 
 type SortDir = "asc" | "desc";
 type WatchSortKey = "score" | "symbol" | "window" | "side" | "z" | "squeeze" | "time";
-type HistoryFilter = Outcome | "all";
+type HistoryFilter = Outcome | "all" | "running";
 type HistoryConfidenceFilter = "all" | "high" | "medium" | "low";
 type MainTab = "radar" | "entry" | "tracked" | "history";
 type EntrySourceFilter = "all" | "radar";
@@ -483,6 +483,31 @@ function TradeLifecycleBadge({ signal, currentPrice }: { signal: SignalLog; curr
   );
 }
 
+// Effective SL based on trailing logic (mirrors resolveOutcome in lib/outcomes.ts).
+// After TP1 → trails to entry (BE). After TP2 → trails to TP1.
+function TrailingSLCell({ row }: { row: SignalLog }) {
+  if (row.outcome !== "active") {
+    return <span className="text-neutral-500">{row.sl != null ? formatPrice(row.sl) : "—"}</span>;
+  }
+  if (row.best_tp === "tp2" && row.tp1 != null) {
+    return (
+      <span title="Trailing SL: TP1 (locked-in TP2 minimum)">
+        <span className="text-emerald-400">{formatPrice(row.tp1)}</span>
+        <span className="ml-1 text-[10px] text-emerald-600">→ TP1</span>
+      </span>
+    );
+  }
+  if (row.best_tp === "tp1") {
+    return (
+      <span title="Trailing SL: entry (locked-in break-even)">
+        <span className="text-emerald-300">{formatPrice(row.entry_price)}</span>
+        <span className="ml-1 text-[10px] text-emerald-600">→ BE</span>
+      </span>
+    );
+  }
+  return <span className="text-neutral-500">{row.sl != null ? formatPrice(row.sl) : "—"}</span>;
+}
+
 function WatchlistTab({
   mode,
   candidates,
@@ -637,8 +662,8 @@ function WatchlistTab({
                         <td className="px-3 py-2 text-right tabular-nums text-cyan-600">
                           {row.tp3 != null ? formatPrice(row.tp3) : "—"}
                         </td>
-                        <td className="px-3 py-2 text-right tabular-nums text-neutral-500">
-                          {row.sl != null ? formatPrice(row.sl) : "—"}
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          <TrailingSLCell row={row} />
                         </td>
                         <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums">
                           {new Date(row.bar_time).toISOString().slice(5, 16).replace("T", " ")}
@@ -778,6 +803,24 @@ function OutcomeBadge({ outcome }: { outcome: Outcome }) {
   );
 }
 
+function RunningBadge({ bestTP }: { bestTP: string | null }) {
+  if (bestTP === "tp2") {
+    return (
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border bg-emerald-600 text-white border-emerald-500">
+        TP2 ✓ →TP3
+      </span>
+    );
+  }
+  if (bestTP === "tp1") {
+    return (
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs rounded border bg-emerald-900 text-emerald-300 border-emerald-700">
+        TP1 ✓ →TP2
+      </span>
+    );
+  }
+  return <OutcomeBadge outcome="active" />;
+}
+
 function HistoryTab({ history, loading, err }: { history: HistoryResult | null; loading: boolean; err: string | null }) {
   const [outcomeFilter, setOutcomeFilter] = useState<HistoryFilter>("all");
   const [confidenceFilter, setConfidenceFilter] = useState<HistoryConfidenceFilter>("all");
@@ -788,7 +831,11 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
   const { signals, stats } = history;
   const resolved = stats.tp3 + stats.tp2 + stats.tp1 + stats.sl + stats.expired;
   const filteredSignals = signals.filter((row) => {
-    if (outcomeFilter !== "all" && row.outcome !== outcomeFilter) return false;
+    if (outcomeFilter === "running") {
+      if (row.outcome !== "active") return false;
+    } else if (outcomeFilter !== "all" && row.outcome !== outcomeFilter) {
+      return false;
+    }
     if (confidenceFilter !== "all" && historyConfidenceBucket(row) !== confidenceFilter) return false;
     return true;
   });
@@ -801,6 +848,9 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
       {/* Stats bar */}
       <div className="mb-4 flex flex-wrap gap-3 text-sm">
         <StatPill label="Resolved" value={stats.total.toString()} active={outcomeFilter === "all"} onClick={() => setOutcomeFilter("all")} />
+        {stats.running > 0 && (
+          <StatPill label="Running" value={stats.running.toString()} color="text-emerald-300" active={outcomeFilter === "running"} onClick={() => setOutcomeFilter("running")} />
+        )}
         <StatPill label="TP3 swing" value={`${stats.tp3} (${stats.tp3Rate}%)`} color="text-cyan-400" active={outcomeFilter === "tp3"} onClick={() => setOutcomeFilter("tp3")} />
         <StatPill label="TP2" value={`${stats.tp2} (${stats.tp2Rate}%)`} color="text-emerald-400" active={outcomeFilter === "tp2"} onClick={() => setOutcomeFilter("tp2")} />
         <StatPill label="TP1" value={`${stats.tp1} (${stats.tp1Rate}%)`} color="text-emerald-300" active={outcomeFilter === "tp1"} onClick={() => setOutcomeFilter("tp1")} />
@@ -832,7 +882,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
 
       {filteredSignals.length === 0 ? (
         <div className="rounded-md border border-neutral-800 bg-neutral-900/40 p-8 text-center text-neutral-500 text-sm">
-          No resolved signals yet. Active signals live in Tracked until TP/SL/expiry.
+          No signals match this filter. History includes resolved + in-flight (TP1+) runners.
         </div>
       ) : (
         <div className="rounded-md border border-neutral-800 overflow-hidden">
@@ -859,13 +909,16 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
               </thead>
               <tbody>
                 {filteredSignals.map((row) => {
-                  const durationMs = row.outcome_at ? row.outcome_at - row.bar_time : null;
+                  const isRunning = row.outcome === "active";
+                  const durationMs = row.outcome_at
+                    ? row.outcome_at - row.bar_time
+                    : isRunning ? Date.now() - row.bar_time : null;
                   const mfe = row.max_favorable && row.entry_price
                     ? Math.abs(row.max_favorable) / row.entry_price * 100 : null;
                   const mae = row.max_adverse && row.entry_price
                     ? Math.abs(row.max_adverse)   / row.entry_price * 100 : null;
                   return (
-                    <tr key={row.id} className="border-t border-neutral-800 hover:bg-neutral-900/40">
+                    <tr key={row.id} className={`border-t border-neutral-800 hover:bg-neutral-900/40 ${isRunning ? "bg-emerald-950/10" : ""}`}>
                       <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums whitespace-nowrap">
                         {new Date(row.bar_time).toISOString().slice(5, 16).replace("T", " ")}
                       </td>
@@ -897,7 +950,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
                         {row.squeeze_score !== null ? <SqueezeBadge score={row.squeeze_score} /> : <span className="text-neutral-600">—</span>}
                       </td>
                       <td className="px-3 py-2">
-                        <OutcomeBadge outcome={row.outcome} />
+                        {isRunning ? <RunningBadge bestTP={row.best_tp} /> : <OutcomeBadge outcome={row.outcome} />}
                       </td>
                       <td className="px-3 py-2 text-right text-xs tabular-nums text-neutral-400">
                         {durationMs ? formatDuration(durationMs) : "—"}

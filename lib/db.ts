@@ -307,6 +307,7 @@ export interface HistoryResult {
     tp1: number;
     sl: number;
     expired: number;
+    running: number;   // active signals that already hit ≥ TP1 (in-flight wins)
     tp3Rate: number;
     tp2Rate: number;
     tp1Rate: number;
@@ -315,19 +316,23 @@ export interface HistoryResult {
   };
 }
 
+// History includes resolved signals AND in-flight running ones (active with best_tp set),
+// so users can see TP1/TP2 that were hit but haven't locked-in via trailing SL yet.
 export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
   const sql = getDb();
   const empty: HistoryResult = {
     signals: [],
-    stats: { total: 0, active: 0, tp3: 0, tp2: 0, tp1: 0, sl: 0, expired: 0, tp3Rate: 0, tp2Rate: 0, tp1Rate: 0, slRate: 0, winRate: 0 },
+    stats: { total: 0, active: 0, tp3: 0, tp2: 0, tp1: 0, sl: 0, expired: 0, running: 0, tp3Rate: 0, tp2Rate: 0, tp1Rate: 0, slRate: 0, winRate: 0 },
   };
   if (!sql) return empty;
 
-  const [rows, counts] = await Promise.all([
+  const [rows, counts, runningRow] = await Promise.all([
     sql`
       SELECT * FROM signal_log
-      WHERE outcome <> 'active'
-      ORDER BY COALESCE(outcome_at, bar_time) DESC
+      WHERE outcome <> 'active' OR best_tp IS NOT NULL
+      ORDER BY
+        CASE WHEN outcome = 'active' THEN 0 ELSE 1 END,
+        COALESCE(outcome_at, bar_time) DESC
       LIMIT ${limit}
     ` as Promise<unknown[]>,
     sql`
@@ -335,6 +340,11 @@ export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
       FROM signal_log
       WHERE outcome <> 'active'
       GROUP BY outcome
+    ` as Promise<unknown[]>,
+    sql`
+      SELECT COUNT(*)::int AS n
+      FROM signal_log
+      WHERE outcome = 'active' AND best_tp IS NOT NULL
     ` as Promise<unknown[]>,
   ]);
 
@@ -347,13 +357,14 @@ export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
   const sl  = cm["sl"]  ?? 0;
   const exp = cm["expired"] ?? 0;
   const resolved = tp3 + tp2 + tp1 + sl + exp;
+  const running = toNumber((runningRow[0] as { n: unknown } | undefined)?.n ?? 0);
 
   return {
     signals: rows.map(normalizeSignalLog),
     stats: {
       total:   resolved,
       active:  0,
-      tp3, tp2, tp1, sl, expired: exp,
+      tp3, tp2, tp1, sl, expired: exp, running,
       tp3Rate: resolved ? Math.round(tp3 / resolved * 100) : 0,
       tp2Rate: resolved ? Math.round(tp2 / resolved * 100) : 0,
       tp1Rate: resolved ? Math.round(tp1 / resolved * 100) : 0,
