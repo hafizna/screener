@@ -842,6 +842,12 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
   const confidenceRows = historyPerformanceRows(signals, historyConfidenceBucket);
   const squeezeRows = historyPerformanceRows(signals, historySqueezeBucket);
   const profileRows = historyPerformanceRows(signals, (row) => row.trigger_level || "unknown");
+  // TP2 magnet source — lets us compare VWAP-anchored vs pure-ATR target performance.
+  const tpSourceRows = historyPerformanceRows(signals, (row) =>
+    row.tp2_source === "vwap_daily" ? "TP2 daily VWAP"
+    : row.tp2_source === "vwap_weekly" ? "TP2 weekly VWAP"
+    : "TP2 pure ATR"
+  );
 
   return (
     <div>
@@ -878,10 +884,11 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
         </div>
       </section>
 
-      <div className="mb-4 grid gap-3 lg:grid-cols-3">
+      <div className="mb-4 grid gap-3 lg:grid-cols-2 xl:grid-cols-4">
         <HistoryBreakdown title="Confidence" rows={confidenceRows} />
         <HistoryBreakdown title="SQZ" rows={squeezeRows} />
         <HistoryBreakdown title="Profile" rows={profileRows} />
+        <HistoryBreakdown title="TP magnet" rows={tpSourceRows} />
       </div>
 
       {filteredSignals.length === 0 ? (

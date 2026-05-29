@@ -46,7 +46,10 @@ export async function ensureSchema() {
       watched          BOOLEAN NOT NULL DEFAULT FALSE,
       watch_expires_at BIGINT,
       -- lifecycle tracking: highest TP reached while signal is still active
-      best_tp          TEXT
+      best_tp          TEXT,
+      -- which magnet each TP snapped to: 'atr', 'vwap_daily', 'vwap_weekly'
+      tp2_source       TEXT,
+      tp3_source       TEXT
     )
   `;
   // Migrations for existing tables
@@ -70,6 +73,8 @@ export async function ensureSchema() {
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS watched BOOLEAN NOT NULL DEFAULT FALSE`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS watch_expires_at BIGINT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS best_tp TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS tp2_source TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS tp3_source TEXT`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_outcome  ON signal_log(outcome)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_bar_time ON signal_log(bar_time DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_symbol   ON signal_log(symbol)`;
@@ -83,7 +88,8 @@ export async function insertSignal(s: Signal, scannedAt: number, regime?: string
     INSERT INTO signal_log
       (id, symbol, timeframe, side, signal_type, regime, entry_price,
        tp1, tp2, tp3, sl, trigger_level, z_level, z_score, squeeze_score,
-       funding_rate, long_short_ratio, bar_time, scanned_at)
+       funding_rate, long_short_ratio, bar_time, scanned_at,
+       tp2_source, tp3_source)
     VALUES (
       ${`${s.symbol}-${s.timeframe}-${s.barTime}`},
       ${s.symbol}, ${s.timeframe}, ${s.side},
@@ -93,7 +99,8 @@ export async function insertSignal(s: Signal, scannedAt: number, regime?: string
       ${s.triggerLevel}, ${s.zLevel}, ${s.zScore},
       ${s.squeezeScore ?? null},
       ${s.fundingRate ?? null}, ${s.longShortRatio ?? null},
-      ${s.barTime}, ${scannedAt}
+      ${s.barTime}, ${scannedAt},
+      ${s.tp2Source ?? null}, ${s.tp3Source ?? null}
     )
     ON CONFLICT (id) DO NOTHING
     RETURNING id
@@ -144,6 +151,8 @@ export interface SignalLog {
   watched: boolean;
   watch_expires_at: number | null;
   best_tp: string | null;
+  tp2_source: string | null;
+  tp3_source: string | null;
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -194,6 +203,8 @@ function normalizeSignalLog(row: unknown): SignalLog {
     watched: Boolean(r.watched),
     watch_expires_at: toNullableNumber(r.watch_expires_at),
     best_tp: r.best_tp == null ? null : String(r.best_tp),
+    tp2_source: r.tp2_source == null ? null : String(r.tp2_source),
+    tp3_source: r.tp3_source == null ? null : String(r.tp3_source),
   };
 }
 
