@@ -310,7 +310,7 @@ export default function DashboardPage() {
               data.stale ? "bg-amber-950/40 border border-amber-900/60 text-amber-200" : "bg-neutral-900 border border-neutral-800 text-neutral-300"
             }`}
           >
-            Last scan: {new Date(data.scannedAt).toLocaleString()} ·{" "}
+            Last scan: {formatWibFull(data.scannedAt)} ·{" "}
             {data.symbolsScanned} symbols · {activeSignals.length} active signals
             {watchlist.length > 0 && ` · ${watchlist.length} radar candidates`}
             {expiredCount > 0 && ` · ${expiredCount} expired hidden`}
@@ -666,7 +666,7 @@ function WatchlistTab({
                           <TrailingSLCell row={row} />
                         </td>
                         <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums">
-                          {new Date(row.bar_time).toISOString().slice(5, 16).replace("T", " ")}
+                          {formatWib(row.bar_time)}
                         </td>
                         <td className="px-3 py-2 whitespace-nowrap">
                           <a href={tradingViewSymbolUrl(row.symbol, row.timeframe as import("@/lib/types").Timeframe)} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300">TV</a>
@@ -721,7 +721,7 @@ function WatchlistTab({
                     <th className="px-3 py-2 font-normal text-right">RS</th>
                     <th className="px-3 py-2 font-normal text-center"><button onClick={() => setSort("squeeze")}>{sortLabel("Sqz", "squeeze")}</button></th>
                     <th className="px-3 py-2 font-normal">Ready / Missing</th>
-                    <th className="px-3 py-2 font-normal"><button onClick={() => setSort("time")}>{sortLabel("Time", "time")}</button></th>
+                    <th className="px-3 py-2 font-normal"><button onClick={() => setSort("time")}>{sortLabel("Time (WIB)", "time")}</button></th>
                     <th className="px-3 py-2 font-normal"></th>
                   </tr>
                 </thead>
@@ -768,7 +768,7 @@ function WatchlistTab({
                         {row.missing.length > 0 && <div className="text-amber-400">{row.missing.slice(0, 2).join(" | ")}</div>}
                       </td>
                       <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums">
-                        {new Date(row.barTime).toISOString().slice(5, 16).replace("T", " ")}
+                        {formatWib(row.barTime)}
                       </td>
                       <td className="px-3 py-2 whitespace-nowrap">
                         <a href={tradingViewSymbolUrl(row.symbol, row.timeframe)} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300">TV</a>
@@ -901,7 +901,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
             <table className="w-full text-sm min-w-[900px]">
               <thead className="bg-neutral-900 text-neutral-400 text-left">
                 <tr>
-                  <th className="px-3 py-2 font-normal">Time</th>
+                  <th className="px-3 py-2 font-normal">Time (WIB)</th>
                   <th className="px-3 py-2 font-normal">Symbol</th>
                   <th className="px-3 py-2 font-normal">Side</th>
                   <th className="px-3 py-2 font-normal">Regime</th>
@@ -931,7 +931,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
                   return (
                     <tr key={row.id} className={`border-t border-neutral-800 hover:bg-neutral-900/40 ${isRunning ? "bg-emerald-950/10" : ""}`}>
                       <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums whitespace-nowrap">
-                        {new Date(row.bar_time).toISOString().slice(5, 16).replace("T", " ")}
+                        {formatWib(row.bar_time)}
                       </td>
                       <td className="px-3 py-2 font-medium">
                         {row.symbol}
@@ -1098,6 +1098,25 @@ function formatDuration(ms: number): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
+// Timestamps are displayed in WIB (GMT+7, Asia/Jakarta) for readability.
+function formatWib(ms: number): string {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Jakarta",
+    month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(ms));
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  return `${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
+}
+
+function formatWibFull(ms: number): string {
+  return new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Jakarta",
+    dateStyle: "medium", timeStyle: "medium",
+  }).format(new Date(ms)) + " WIB";
+}
+
 function FilterGroup({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex items-center gap-1.5">
@@ -1202,7 +1221,7 @@ function SignalTable({ signals, regime, watched, onWatch }: {
             {th("State", "Entry viability from current mark price versus entry, SL, and TP1.")}
             <th className="px-3 py-2 font-normal text-right" title="ATR targets: SL (1×) · TP1 (1.5×) · TP2 (3×) · TP3 cyan (5× swing)">Targets</th>
             <th className="px-3 py-2 font-normal text-right" title="How long ago the trigger bar closed">Age</th>
-            {th("Time")}
+            {th("Time (WIB)")}
             <th className="px-3 py-2 font-normal"></th>
           </tr>
         </thead>
@@ -1287,7 +1306,7 @@ function SignalTable({ signals, regime, watched, onWatch }: {
                 <AgeBadge barTime={s.barTime} />
               </td>
               <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums">
-                {new Date(s.barTime).toISOString().slice(5, 16).replace("T", " ")}
+                {formatWib(s.barTime)}
               </td>
               <td className="px-3 py-2 whitespace-nowrap">
                 <a href={tradingViewUrl(s)} target="_blank" rel="noopener noreferrer"
