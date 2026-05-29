@@ -15,7 +15,8 @@ import { detectRecentSignals, detectWatchCandidate } from "@/lib/signals";
 import { dailyVwap, weeklyVwap } from "@/lib/vwap";
 import { computeTargets } from "@/lib/targets";
 import { storeScanResult, loadLatestScan } from "@/lib/kv";
-import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, updateBestTP, expireOldSignals, pruneOldSignals } from "@/lib/db";
+import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, updateBestTP, expireOldSignals, pruneOldSignals, upsertRadarCandidates, markRadarFired, pruneStaleRadar } from "@/lib/db";
+import type { RadarUpsert } from "@/lib/db";
 import { resolveOutcome } from "@/lib/outcomes";
 
 export const maxDuration = 60;
@@ -275,8 +276,37 @@ export async function GET(req: NextRequest) {
   try {
     await ensureSchema();
 
-    // 7a. Insert new signals (ON CONFLICT DO NOTHING, so re-runs are safe)
-    const inserted = await Promise.all(signals.map((s) => insertSignal(s, scanResult.scannedAt, regime)));
+    // 7a-pre. Upsert this scan's radar candidates so their lifecycle is tracked
+    //         across scans (when first seen, peak score, eventual firing).
+    const radarUpserts: RadarUpsert[] = scanResult.watchlist?.map((w) => ({
+      symbol: w.symbol,
+      timeframe: w.timeframe,
+      side: w.side,
+      state: w.state,
+      score: w.score,
+      biasWindow: w.biasWindow,
+      zLevel: w.zLevel,
+      zScore: w.zScore,
+      triggerLevel: w.triggerLevel,
+      triggerPrice: w.triggerPrice,
+      entryPrice: w.entryPrice,
+      sl: w.sl,
+      tp1: w.tp1,
+      tp2: w.tp2,
+      tp3: w.tp3,
+      squeezeScore: w.squeezeScore,
+    })) ?? [];
+    await upsertRadarCandidates(radarUpserts, scanResult.scannedAt);
+
+    // 7a. Insert new signals (ON CONFLICT DO NOTHING, so re-runs are safe).
+    //     If a signal came from the radar, mark that radar candidate fired and
+    //     copy its first-seen time onto the signal so the board can trace it.
+    const inserted = await Promise.all(signals.map(async (s) => {
+      const radarFirstSeen = s.fromWatchlist
+        ? await markRadarFired(s.symbol, s.side, scanResult.scannedAt).catch(() => null)
+        : null;
+      return insertSignal(s, scanResult.scannedAt, regime, radarFirstSeen);
+    }));
     dbSignalsInserted = inserted.filter(Boolean).length;
 
     // 7b. Expire stale active signals (> 24h old, no level hit)
@@ -317,6 +347,8 @@ export async function GET(req: NextRequest) {
 
     // 7d. Retention cleanup to keep DB storage bounded.
     dbSignalsPruned = await pruneOldSignals();
+    // Drop radar candidates not seen in the last 3 hours (and never fired).
+    await pruneStaleRadar(Date.now() - 3 * 60 * 60_000);
   } catch (e) {
     dbError = (e as Error).message;
     console.error("DB write failed", e);

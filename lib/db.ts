@@ -52,7 +52,9 @@ export async function ensureSchema() {
       tp3_source       TEXT,
       -- manual paper trade fields: set when user logs a trade from the Entry tab
       paper_traded_at  BIGINT,
-      paper_entry      REAL
+      paper_entry      REAL,
+      -- genealogy: when this setup first appeared on the radar (if it did)
+      radar_first_seen BIGINT
     )
   `;
   // Migrations for existing tables
@@ -80,13 +82,49 @@ export async function ensureSchema() {
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS tp3_source TEXT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS paper_traded_at BIGINT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS paper_entry REAL`;
+  // Genealogy: when a fired signal was on the radar first, this records when the
+  // radar candidate was initially detected — so the board can trace radar → fired.
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS radar_first_seen BIGINT`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_outcome  ON signal_log(outcome)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_bar_time ON signal_log(bar_time DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_symbol   ON signal_log(symbol)`;
+
+  // ── radar_log: live pre-signal candidates ──────────────────────────────────
+  // One row per symbol+side+timeframe candidate, upserted each scan. Keeps a
+  // history of WHEN a setup first appeared on radar and how its score evolved,
+  // so we can trace the full lifecycle (radar → fired → resolved).
+  await sql`
+    CREATE TABLE IF NOT EXISTS radar_log (
+      id              TEXT PRIMARY KEY,
+      symbol          TEXT NOT NULL,
+      timeframe       TEXT NOT NULL,
+      side            TEXT NOT NULL,
+      state           TEXT NOT NULL,
+      score           INTEGER NOT NULL,
+      bias_window     TEXT,
+      z_level         INTEGER,
+      z_score         REAL,
+      trigger_level   TEXT,
+      trigger_price   REAL,
+      entry_price     REAL,
+      sl              REAL,
+      tp1             REAL,
+      tp2             REAL,
+      tp3             REAL,
+      squeeze_score   INTEGER,
+      first_seen_at   BIGINT NOT NULL,
+      last_seen_at    BIGINT NOT NULL,
+      best_score      INTEGER NOT NULL,
+      fired           BOOLEAN NOT NULL DEFAULT FALSE,
+      fired_at        BIGINT
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_radar_last_seen ON radar_log(last_seen_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_radar_fired     ON radar_log(fired)`;
 }
 
 // ─── Write path ───────────────────────────────────────────────────────────────
-export async function insertSignal(s: Signal, scannedAt: number, regime?: string): Promise<boolean> {
+export async function insertSignal(s: Signal, scannedAt: number, regime?: string, radarFirstSeen?: number | null): Promise<boolean> {
   const sql = getDb();
   if (!sql) return false;
   const rows = await sql`
@@ -94,7 +132,7 @@ export async function insertSignal(s: Signal, scannedAt: number, regime?: string
       (id, symbol, timeframe, side, signal_type, regime, entry_price,
        tp1, tp2, tp3, sl, trigger_level, z_level, z_score, squeeze_score,
        funding_rate, long_short_ratio, bar_time, scanned_at,
-       tp2_source, tp3_source)
+       tp2_source, tp3_source, radar_first_seen)
     VALUES (
       ${`${s.symbol}-${s.timeframe}-${s.barTime}`},
       ${s.symbol}, ${s.timeframe}, ${s.side},
@@ -105,7 +143,8 @@ export async function insertSignal(s: Signal, scannedAt: number, regime?: string
       ${s.squeezeScore ?? null},
       ${s.fundingRate ?? null}, ${s.longShortRatio ?? null},
       ${s.barTime}, ${scannedAt},
-      ${s.tp2Source ?? null}, ${s.tp3Source ?? null}
+      ${s.tp2Source ?? null}, ${s.tp3Source ?? null},
+      ${radarFirstSeen ?? null}
     )
     ON CONFLICT (id) DO NOTHING
     RETURNING id
@@ -160,6 +199,7 @@ export interface SignalLog {
   tp3_source: string | null;
   paper_traded_at: number | null;
   paper_entry: number | null;
+  radar_first_seen: number | null;
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -214,6 +254,7 @@ function normalizeSignalLog(row: unknown): SignalLog {
     tp3_source: r.tp3_source == null ? null : String(r.tp3_source),
     paper_traded_at: toNullableNumber(r.paper_traded_at),
     paper_entry: toNullableNumber(r.paper_entry),
+    radar_first_seen: toNullableNumber(r.radar_first_seen),
   };
 }
 
@@ -409,4 +450,170 @@ export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
       provisionalWinRate: totalWithRunning ? Math.round((tp1 + tp2 + tp3 + running) / totalWithRunning * 100) : 0,
     },
   };
+}
+
+// Recently resolved signals — used for the board's Resolved column (continuity),
+// distinct from the full History tab (which carries stats + breakdowns).
+export async function getRecentResolved(limit = 25): Promise<SignalLog[]> {
+  const sql = getDb();
+  if (!sql) return [];
+  const rows = await sql`
+    SELECT * FROM signal_log
+    WHERE outcome <> 'active'
+    ORDER BY COALESCE(outcome_at, bar_time) DESC
+    LIMIT ${limit}
+  ` as unknown[];
+  return rows.map(normalizeSignalLog);
+}
+
+// ─── Radar log ──────────────────────────────────────────────────────────────
+export interface RadarLog {
+  id: string;
+  symbol: string;
+  timeframe: string;
+  side: "long" | "short";
+  state: string;
+  score: number;
+  bias_window: string | null;
+  z_level: number;
+  z_score: number;
+  trigger_level: string | null;
+  trigger_price: number | null;
+  entry_price: number | null;
+  sl: number | null;
+  tp1: number | null;
+  tp2: number | null;
+  tp3: number | null;
+  squeeze_score: number | null;
+  first_seen_at: number;
+  last_seen_at: number;
+  best_score: number;
+  fired: boolean;
+  fired_at: number | null;
+}
+
+function normalizeRadarLog(row: unknown): RadarLog {
+  const r = row as Record<string, unknown>;
+  return {
+    id: String(r.id ?? ""),
+    symbol: String(r.symbol ?? ""),
+    timeframe: String(r.timeframe ?? ""),
+    side: r.side === "short" ? "short" : "long",
+    state: String(r.state ?? "watch"),
+    score: toNumber(r.score),
+    bias_window: r.bias_window == null ? null : String(r.bias_window),
+    z_level: toNumber(r.z_level),
+    z_score: toNumber(r.z_score),
+    trigger_level: r.trigger_level == null ? null : String(r.trigger_level),
+    trigger_price: toNullableNumber(r.trigger_price),
+    entry_price: toNullableNumber(r.entry_price),
+    sl: toNullableNumber(r.sl),
+    tp1: toNullableNumber(r.tp1),
+    tp2: toNullableNumber(r.tp2),
+    tp3: toNullableNumber(r.tp3),
+    squeeze_score: toNullableNumber(r.squeeze_score),
+    first_seen_at: toNumber(r.first_seen_at),
+    last_seen_at: toNumber(r.last_seen_at),
+    best_score: toNumber(r.best_score),
+    fired: Boolean(r.fired),
+    fired_at: toNullableNumber(r.fired_at),
+  };
+}
+
+// Minimal shape the cron passes in for each candidate (mirrors WatchCandidate).
+export interface RadarUpsert {
+  symbol: string;
+  timeframe: string;
+  side: "long" | "short";
+  state: string;
+  score: number;
+  biasWindow?: string;
+  zLevel: number;
+  zScore: number;
+  triggerLevel?: string;
+  triggerPrice?: number;
+  entryPrice?: number;
+  sl?: number;
+  tp1?: number;
+  tp2?: number;
+  tp3?: number;
+  squeezeScore?: number;
+}
+
+// Upsert one scan's worth of radar candidates. Preserves first_seen_at and the
+// running best_score; refreshes the live fields and last_seen_at.
+export async function upsertRadarCandidates(candidates: RadarUpsert[], scannedAt: number): Promise<void> {
+  const sql = getDb();
+  if (!sql || candidates.length === 0) return;
+  await Promise.all(candidates.map((c) => {
+    const id = `${c.symbol}-${c.timeframe}-${c.side}`;
+    return sql`
+      INSERT INTO radar_log
+        (id, symbol, timeframe, side, state, score, bias_window, z_level, z_score,
+         trigger_level, trigger_price, entry_price, sl, tp1, tp2, tp3, squeeze_score,
+         first_seen_at, last_seen_at, best_score, fired)
+      VALUES (
+        ${id}, ${c.symbol}, ${c.timeframe}, ${c.side}, ${c.state}, ${c.score},
+        ${c.biasWindow ?? null}, ${c.zLevel}, ${c.zScore},
+        ${c.triggerLevel ?? null}, ${c.triggerPrice ?? null}, ${c.entryPrice ?? null},
+        ${c.sl ?? null}, ${c.tp1 ?? null}, ${c.tp2 ?? null}, ${c.tp3 ?? null},
+        ${c.squeezeScore ?? null},
+        ${scannedAt}, ${scannedAt}, ${c.score}, FALSE
+      )
+      ON CONFLICT (id) DO UPDATE SET
+        state = ${c.state}, score = ${c.score}, bias_window = ${c.biasWindow ?? null},
+        z_level = ${c.zLevel}, z_score = ${c.zScore},
+        trigger_level = ${c.triggerLevel ?? null}, trigger_price = ${c.triggerPrice ?? null},
+        entry_price = ${c.entryPrice ?? null}, sl = ${c.sl ?? null},
+        tp1 = ${c.tp1 ?? null}, tp2 = ${c.tp2 ?? null}, tp3 = ${c.tp3 ?? null},
+        squeeze_score = ${c.squeezeScore ?? null},
+        last_seen_at = ${scannedAt},
+        best_score = GREATEST(radar_log.best_score, ${c.score}),
+        -- a candidate that was previously fired stays fired
+        fired = radar_log.fired
+    `;
+  }));
+}
+
+// Mark a radar candidate as fired and return when it was first seen, so the
+// fired signal can record its radar genealogy. Matches by symbol+side (radar
+// candidates are 15m, but the signal that fires may be 15m or 1h). Returns the
+// earliest first_seen_at, or null if the setup was never on radar.
+export async function markRadarFired(symbol: string, side: string, firedAt: number): Promise<number | null> {
+  const sql = getDb();
+  if (!sql) return null;
+  const rows = await sql`
+    UPDATE radar_log
+    SET fired = TRUE, fired_at = ${firedAt}
+    WHERE symbol = ${symbol} AND side = ${side} AND fired = FALSE
+    RETURNING first_seen_at
+  ` as Array<{ first_seen_at: unknown }>;
+  if (rows.length === 0) return null;
+  return Math.min(...rows.map((r) => toNumber(r.first_seen_at)));
+}
+
+// Live radar candidates for the board: not fired, seen recently. `sinceMs` is
+// the freshness window — anything not seen since then is considered stale.
+export async function getRadarCandidates(sinceMs: number): Promise<RadarLog[]> {
+  const sql = getDb();
+  if (!sql) return [];
+  const rows = await sql`
+    SELECT * FROM radar_log
+    WHERE fired = FALSE AND last_seen_at >= ${sinceMs}
+    ORDER BY score DESC, z_score DESC
+    LIMIT 60
+  ` as unknown[];
+  return rows.map(normalizeRadarLog);
+}
+
+// Drop stale radar rows (not seen for a while and never fired) to keep it bounded.
+export async function pruneStaleRadar(cutoffMs: number): Promise<number> {
+  const sql = getDb();
+  if (!sql) return 0;
+  const rows = await sql`
+    DELETE FROM radar_log
+    WHERE fired = FALSE AND last_seen_at < ${cutoffMs}
+    RETURNING id
+  ` as Array<{ id: string }>;
+  return rows.length;
 }
