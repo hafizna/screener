@@ -856,8 +856,12 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
         <StatPill label="TP1" value={`${stats.tp1} (${stats.tp1Rate}%)`} color="text-emerald-300" active={outcomeFilter === "tp1"} onClick={() => setOutcomeFilter("tp1")} />
         <StatPill label="SL"  value={`${stats.sl} (${stats.slRate}%)`}   color="text-red-400" active={outcomeFilter === "sl"} onClick={() => setOutcomeFilter("sl")} />
         <StatPill label="Expired" value={stats.expired.toString()} color="text-neutral-500" active={outcomeFilter === "expired"} onClick={() => setOutcomeFilter("expired")} />
-        {resolved > 0 && (
-          <StatPill label="Win rate" value={`${stats.winRate}%`} color="text-amber-300" />
+        {(resolved > 0 || stats.running > 0) && (
+          <StatPill
+            label="Win rate"
+            value={stats.running > 0 ? `${stats.provisionalWinRate}% (${stats.winRate}% conf.)` : `${stats.winRate}%`}
+            color="text-amber-300"
+          />
         )}
       </div>
 

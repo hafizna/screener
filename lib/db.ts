@@ -302,17 +302,18 @@ export interface HistoryResult {
   stats: {
     total: number;
     active: number;
+    running: number;       // active signals that already hit ≥ TP1 (in-flight wins)
     tp3: number;
     tp2: number;
     tp1: number;
     sl: number;
     expired: number;
-    running: number;   // active signals that already hit ≥ TP1 (in-flight wins)
     tp3Rate: number;
     tp2Rate: number;
     tp1Rate: number;
     slRate: number;
-    winRate: number;  // (tp1+tp2+tp3) / resolved
+    winRate: number;           // (tp1+tp2+tp3) / resolved — confirmed only
+    provisionalWinRate: number; // (tp1+tp2+tp3+running) / (resolved+running)
   };
 }
 
@@ -322,7 +323,7 @@ export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
   const sql = getDb();
   const empty: HistoryResult = {
     signals: [],
-    stats: { total: 0, active: 0, tp3: 0, tp2: 0, tp1: 0, sl: 0, expired: 0, running: 0, tp3Rate: 0, tp2Rate: 0, tp1Rate: 0, slRate: 0, winRate: 0 },
+    stats: { total: 0, active: 0, running: 0, tp3: 0, tp2: 0, tp1: 0, sl: 0, expired: 0, tp3Rate: 0, tp2Rate: 0, tp1Rate: 0, slRate: 0, winRate: 0, provisionalWinRate: 0 },
   };
   if (!sql) return empty;
 
@@ -342,8 +343,7 @@ export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
       GROUP BY outcome
     ` as Promise<unknown[]>,
     sql`
-      SELECT COUNT(*)::int AS n
-      FROM signal_log
+      SELECT COUNT(*)::int AS n FROM signal_log
       WHERE outcome = 'active' AND best_tp IS NOT NULL
     ` as Promise<unknown[]>,
   ]);
@@ -351,25 +351,28 @@ export async function getSignalHistory(limit = 200): Promise<HistoryResult> {
   const cm = Object.fromEntries(
     (counts as Array<{ outcome: string; n: unknown }>).map((r) => [r.outcome, toNumber(r.n)])
   );
-  const tp3 = cm["tp3"] ?? 0;
-  const tp2 = cm["tp2"] ?? 0;
-  const tp1 = cm["tp1"] ?? 0;
-  const sl  = cm["sl"]  ?? 0;
-  const exp = cm["expired"] ?? 0;
+  const tp3     = cm["tp3"] ?? 0;
+  const tp2     = cm["tp2"] ?? 0;
+  const tp1     = cm["tp1"] ?? 0;
+  const sl      = cm["sl"]  ?? 0;
+  const exp     = cm["expired"] ?? 0;
+  const running = toNumber((runningRow[0] as Record<string, unknown>)?.n ?? 0);
   const resolved = tp3 + tp2 + tp1 + sl + exp;
-  const running = toNumber((runningRow[0] as { n: unknown } | undefined)?.n ?? 0);
+  const totalWithRunning = resolved + running;
 
   return {
     signals: rows.map(normalizeSignalLog),
     stats: {
       total:   resolved,
       active:  0,
-      tp3, tp2, tp1, sl, expired: exp, running,
+      running,
+      tp3, tp2, tp1, sl, expired: exp,
       tp3Rate: resolved ? Math.round(tp3 / resolved * 100) : 0,
       tp2Rate: resolved ? Math.round(tp2 / resolved * 100) : 0,
       tp1Rate: resolved ? Math.round(tp1 / resolved * 100) : 0,
       slRate:  resolved ? Math.round(sl  / resolved * 100) : 0,
       winRate: resolved ? Math.round((tp1 + tp2 + tp3) / resolved * 100) : 0,
+      provisionalWinRate: totalWithRunning ? Math.round((tp1 + tp2 + tp3 + running) / totalWithRunning * 100) : 0,
     },
   };
 }
