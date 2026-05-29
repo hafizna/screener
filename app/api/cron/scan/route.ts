@@ -12,6 +12,8 @@ import { computeATR, computeRS, computeSqueezeScore } from "@/lib/atr";
 import type { BiasWindow, FRBias, LsBias, MarketRegime, Signal, SignalType, ScanResult, WatchCandidate } from "@/lib/types";
 import { analyzeBias } from "@/lib/bias";
 import { detectRecentSignals, detectWatchCandidate } from "@/lib/signals";
+import { dailyVwap, weeklyVwap } from "@/lib/vwap";
+import { computeTargets } from "@/lib/targets";
 import { storeScanResult, loadLatestScan } from "@/lib/kv";
 import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, updateBestTP, expireOldSignals, pruneOldSignals } from "@/lib/db";
 import { resolveOutcome } from "@/lib/outcomes";
@@ -123,6 +125,11 @@ export async function GET(req: NextRequest) {
     // ATR-based targets from 1H klines
     const atr1h = computeATR(oneHourKlines, 14);
 
+    // Anchored VWAPs (free — klines already fetched). Daily from 15m, weekly
+    // from 1h. Used as observable confluence and to anchor TP2/TP3 magnets.
+    const vwapDaily = dailyVwap(entryKlines);
+    const vwapWeekly = weeklyVwap(oneHourKlines);
+
     // Also detect 1H signals (free — klines already fetched above)
     const recentSignals1h = detectRecentSignals(symbol, "1h", oneHourKlines, RECENT_SIGNAL_BARS_1H);
     const allRecentSignals = [...recentSignals, ...recentSignals1h];
@@ -146,10 +153,10 @@ export async function GET(req: NextRequest) {
           : undefined;
         const signalType = determineSignalType(signal.side, regime, lsBias, frBias);
         const entry = signal.barClose;
-        const tp1 = atr1h > 0 ? (signal.side === "long" ? entry + 1.5 * atr1h : entry - 1.5 * atr1h) : undefined;
-        const tp2 = atr1h > 0 ? (signal.side === "long" ? entry + 3.0 * atr1h : entry - 3.0 * atr1h) : undefined;
-        const tp3 = atr1h > 0 ? (signal.side === "long" ? entry + 5.0 * atr1h : entry - 5.0 * atr1h) : undefined;
-        const sl  = atr1h > 0 ? (signal.side === "long" ? entry - 1.0 * atr1h : entry + 1.0 * atr1h) : undefined;
+        // VWAP-anchored targets: TP1 fixed at 1.5× ATR, TP2/TP3 snap to the
+        // nearest VWAP magnet inside the 3×/5× ATR caps (or fall back to ATR).
+        const targets = computeTargets({ entry, side: signal.side, atr: atr1h, vwapDaily, vwapWeekly });
+        const { sl, tp1, tp2, tp3, tp2Source, tp3Source } = targets;
         const squeezeScore = computeSqueezeScore(
           signal.side,
           frInfo?.lastFundingRate,
@@ -175,7 +182,12 @@ export async function GET(req: NextRequest) {
           ...(oiChangePct !== undefined ? { oiChangePct, oiBias } : {}),
           ...(longShortRatio !== undefined ? { longShortRatio, lsBias } : {}),
           signalType,
-          ...(atr1h > 0 ? { atr1h, tp1, tp2, tp3, sl } : {}),
+          ...(atr1h > 0 ? { atr1h, tp1, tp2, tp3, sl, tp2Source, tp3Source } : {}),
+          ...(vwapDaily != null ? { vwapDaily } : {}),
+          ...(vwapWeekly != null ? {
+            vwapWeekly,
+            nearWeeklyVwap: Math.abs(entry - vwapWeekly) <= atr1h * 0.5,
+          } : {}),
           ...(relativeStrength !== undefined ? { relativeStrength, rsBias } : {}),
           squeezeScore,
           fromWatchlist,
@@ -188,6 +200,8 @@ export async function GET(req: NextRequest) {
           bias4h,
           regime,
           atr1h,
+          vwapDaily,
+          vwapWeekly,
           fr: frInfo?.lastFundingRate,
           oiChangePct,
           oiBias,
@@ -337,6 +351,8 @@ function enrichWatchCandidate(
     bias4h: Bias;
     regime: MarketRegime;
     atr1h: number;
+    vwapDaily?: number | null;
+    vwapWeekly?: number | null;
     fr?: number;
     oiChangePct?: number;
     oiBias?: "rising" | "flat" | "falling";
@@ -349,10 +365,10 @@ function enrichWatchCandidate(
   const frBias = ctx.fr !== undefined ? classifyFR(watch.side, ctx.fr, ctx.regime) : undefined;
   const signalType = determineSignalType(watch.side, ctx.regime, ctx.lsBias, frBias);
   const entryPrice = watch.barClose;
-  const tp1 = ctx.atr1h > 0 ? (watch.side === "long" ? entryPrice + 1.5 * ctx.atr1h : entryPrice - 1.5 * ctx.atr1h) : undefined;
-  const tp2 = ctx.atr1h > 0 ? (watch.side === "long" ? entryPrice + 3.0 * ctx.atr1h : entryPrice - 3.0 * ctx.atr1h) : undefined;
-  const tp3 = ctx.atr1h > 0 ? (watch.side === "long" ? entryPrice + 5.0 * ctx.atr1h : entryPrice - 5.0 * ctx.atr1h) : undefined;
-  const sl  = ctx.atr1h > 0 ? (watch.side === "long" ? entryPrice - 1.0 * ctx.atr1h : entryPrice + 1.0 * ctx.atr1h) : undefined;
+  const { sl, tp1, tp2, tp3, tp2Source, tp3Source } = computeTargets({
+    entry: entryPrice, side: watch.side, atr: ctx.atr1h,
+    vwapDaily: ctx.vwapDaily, vwapWeekly: ctx.vwapWeekly,
+  });
   const squeezeScore = computeSqueezeScore(
     watch.side,
     ctx.fr,
@@ -405,7 +421,9 @@ function enrichWatchCandidate(
     bias4h: ctx.bias4h.bias,
     biasScore1h: ctx.bias1h.score,
     biasScore4h: ctx.bias4h.score,
-    ...(ctx.atr1h > 0 ? { atr1h: ctx.atr1h, entryPrice, tp1, tp2, tp3, sl } : { entryPrice }),
+    ...(ctx.atr1h > 0 ? { atr1h: ctx.atr1h, entryPrice, tp1, tp2, tp3, sl, tp2Source, tp3Source } : { entryPrice }),
+    ...(ctx.vwapDaily != null ? { vwapDaily: ctx.vwapDaily } : {}),
+    ...(ctx.vwapWeekly != null ? { vwapWeekly: ctx.vwapWeekly } : {}),
     ...(ctx.fr !== undefined ? { fundingRate: ctx.fr, frBias } : {}),
     ...(ctx.oiChangePct !== undefined ? { oiChangePct: ctx.oiChangePct, oiBias: ctx.oiBias } : {}),
     ...(ctx.longShortRatio !== undefined ? { longShortRatio: ctx.longShortRatio, lsBias: ctx.lsBias } : {}),

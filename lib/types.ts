@@ -97,9 +97,16 @@ export interface Signal {
   // ATR-based targets (from 1H klines, 14-period SMA ATR)
   atr1h?: number;
   tp1?: number;     // entry + 1.5 × ATR (long) or entry - 1.5 × ATR (short)
-  tp2?: number;     // entry + 3.0 × ATR (long) or entry - 3.0 × ATR (short)
-  tp3?: number;     // entry + 5.0 × ATR — swing target (3-5 day hold)
+  tp2?: number;     // entry + 3.0 × ATR cap, or nearest VWAP magnet inside it
+  tp3?: number;     // entry + 5.0 × ATR swing cap, or nearest VWAP magnet inside it
   sl?: number;      // entry - 1.0 × ATR (long) or entry + 1.0 × ATR (short)
+  // Anchored VWAPs at signal time — observable confluence (daily resets UTC
+  // midnight, weekly resets UTC Monday). Also used to anchor TP2/TP3 magnets.
+  vwapDaily?: number;
+  vwapWeekly?: number;
+  // Which magnet each TP snapped to: "atr" (pure cap), "vwap_daily", "vwap_weekly".
+  tp2Source?: "atr" | "vwap_daily" | "vwap_weekly";
+  tp3Source?: "atr" | "vwap_daily" | "vwap_weekly";
   // Relative Strength vs BTC over last 4 × 4H bars
   relativeStrength?: number;  // >1 = outperforming BTC
   rsBias?: "strong" | "neutral" | "weak";
@@ -136,6 +143,10 @@ export interface WatchCandidate {
   tp2?: number;
   tp3?: number;
   sl?: number;
+  vwapDaily?: number;
+  vwapWeekly?: number;
+  tp2Source?: "atr" | "vwap_daily" | "vwap_weekly";
+  tp3Source?: "atr" | "vwap_daily" | "vwap_weekly";
   fundingRate?: number;
   frBias?: FRBias;
   oiChangePct?: number;

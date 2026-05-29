@@ -1535,6 +1535,20 @@ function SqueezeBadge({ score }: { score: number }) {
   );
 }
 
+function tpSourceLabel(src?: "atr" | "vwap_daily" | "vwap_weekly"): string {
+  return src === "vwap_daily" ? "daily VWAP magnet" : src === "vwap_weekly" ? "weekly VWAP magnet" : "ATR cap";
+}
+
+// A tiny superscript marker on TPs that snapped to a VWAP magnet (D = daily, W = weekly).
+function VwapMark({ src }: { src?: "atr" | "vwap_daily" | "vwap_weekly" }) {
+  if (src !== "vwap_daily" && src !== "vwap_weekly") return null;
+  return (
+    <sup className="ml-0.5 text-[9px] text-sky-400" title={tpSourceLabel(src)}>
+      {src === "vwap_daily" ? "ᴰ" : "ᵂ"}
+    </sup>
+  );
+}
+
 function TargetsCell({ signal: s }: { signal: Signal }) {
   if (s.tp1 === undefined || s.tp2 === undefined || s.sl === undefined) {
     return <span className="text-neutral-600 text-xs">—</span>;
@@ -1551,25 +1565,25 @@ function TargetsCell({ signal: s }: { signal: Signal }) {
       <span className="text-neutral-600">·</span>
       <span
         className={isLong ? "text-emerald-300" : "text-pink-300"}
-        title={`TP1: ${formatPrice(s.tp1)} (1.5× ATR)`}
+        title={`TP1: ${formatPrice(s.tp1)} (1.5× ATR anchor)`}
       >
         {formatPrice(s.tp1)}
       </span>
       <span className="text-neutral-600">·</span>
       <span
         className={isLong ? "text-emerald-400" : "text-pink-400"}
-        title={`TP2: ${formatPrice(s.tp2)} (3× ATR)`}
+        title={`TP2: ${formatPrice(s.tp2)} — ${tpSourceLabel(s.tp2Source)} (capped at 3× ATR)`}
       >
-        {formatPrice(s.tp2)}
+        {formatPrice(s.tp2)}<VwapMark src={s.tp2Source} />
       </span>
       {s.tp3 !== undefined && (
         <>
           <span className="text-neutral-600">·</span>
           <span
             className={isLong ? "text-cyan-400" : "text-violet-400"}
-            title={`TP3: ${formatPrice(s.tp3)} (5× ATR — swing target)`}
+            title={`TP3: ${formatPrice(s.tp3)} — ${tpSourceLabel(s.tp3Source)} (capped at 5× ATR swing)`}
           >
-            {formatPrice(s.tp3)}
+            {formatPrice(s.tp3)}<VwapMark src={s.tp3Source} />
           </span>
         </>
       )}
