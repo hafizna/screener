@@ -63,10 +63,24 @@ export default function DashboardPage() {
   const [histErr, setHistErr] = useState<string | null>(null);
 
   // ── Tracked signals from DB ─────────────────────────────────────────────────
-  type TrackedSignal = SignalLog & { current_price: number | null };
+  type TrackedSignal = SignalLog & { current_price: number | null; paper_traded_at: number | null; paper_entry: number | null };
   const [trackedSignals, setTrackedSignals] = useState<TrackedSignal[] | null>(null);
   const [trackedLoading, setTrackedLoading] = useState(false);
   const [trackedErr, setTrackedErr] = useState<string | null>(null);
+
+  // Paper-traded signal ids: tracked per-session so the button updates immediately.
+  const [papered, setPapered] = useState<Set<string>>(new Set());
+
+  async function logPaperTrade(id: string, entryPrice: number) {
+    setPapered((prev) => new Set(prev).add(id));
+    await fetch("/api/paper-trades", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id, entryPrice }),
+    }).catch(() => {});
+    // Reload tracked signals so the paper trade appears in the Tracked tab immediately.
+    loadTrackedSignals();
+  }
 
   // Starred ids are persisted in localStorage so the button state survives refresh.
   const [watched, setWatched] = useState<Set<string>>(() => {
@@ -438,6 +452,8 @@ export default function DashboardPage() {
         regime={data && "regime" in data ? (data.regime as MarketRegime | undefined) : undefined}
         watched={watched}
         onWatch={watchSignal}
+        papered={papered}
+        onPaperTrade={logPaperTrade}
       />
       </>)}
       </>)}
@@ -560,19 +576,25 @@ function WatchlistTab({
   const sortLabel = (label: string, key: WatchSortKey) =>
     `${label}${sortKey === key ? (sortDir === "asc" ? " ↑" : " ↓") : ""}`;
 
-  // Split tracked signals by lifecycle state
-  const running  = tracked?.filter((s) => s.outcome === "active" && s.best_tp != null) ?? [];
-  const nearEntry = tracked?.filter((s) => {
+  // Paper trades: signals the user explicitly logged via the "Paper Trade" button.
+  const paperTrades = tracked?.filter((s) => s.paper_traded_at != null) ?? [];
+
+  // Auto-tracked signals (active + watched — exclude signals that are ONLY tracked via paper trade)
+  const autoTracked = tracked?.filter((s) => s.outcome === "active" || s.watched) ?? [];
+
+  // Split auto-tracked by lifecycle state
+  const running  = autoTracked?.filter((s) => s.outcome === "active" && s.best_tp != null) ?? [];
+  const nearEntry = autoTracked?.filter((s) => {
     if (s.outcome !== "active" || s.best_tp != null) return false;
     if (s.current_price == null || s.entry_price <= 0) return false;
     return Math.abs(s.current_price - s.entry_price) / s.entry_price * 100 <= 1.0;
   }) ?? [];
-  const waiting  = tracked?.filter((s) => {
+  const waiting  = autoTracked?.filter((s) => {
     if (s.outcome !== "active" || s.best_tp != null) return false;
     if (s.current_price == null || s.entry_price <= 0) return true;
     return Math.abs(s.current_price - s.entry_price) / s.entry_price * 100 > 1.0;
   }) ?? [];
-  const resolved = tracked?.filter((s) => s.outcome !== "active") ?? [];
+  const resolved = autoTracked?.filter((s) => s.outcome !== "active") ?? [];
 
   return (
     <div className="space-y-6">
@@ -581,8 +603,8 @@ function WatchlistTab({
         <section>
           <div className="flex items-center justify-between mb-2">
             <h2 className="text-sm font-medium text-neutral-300">
-              Active / Starred Signals
-              {tracked && ` · ${tracked.length} total`}
+              Tracked Signals
+              {tracked && ` · ${autoTracked.length} auto · ${paperTrades.length} paper`}
             </h2>
             <button
               onClick={onReloadTracked}
@@ -606,13 +628,106 @@ function WatchlistTab({
             <div className="text-neutral-600 text-sm py-4 text-center">No tracked data loaded yet.</div>
           )}
 
-          {tracked !== null && tracked.length === 0 && (
+          {/* ── My Paper Trades ──────────────────────────────────────────────── */}
+          {tracked !== null && paperTrades.length > 0 && (
+            <div className="mb-4">
+              <h3 className="text-xs font-medium text-neutral-400 mb-2 uppercase tracking-wide">
+                My Paper Trades · {paperTrades.length}
+              </h3>
+              <div className="rounded-md border border-emerald-900/40 overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm min-w-[760px]">
+                    <thead className="bg-emerald-950/20 text-neutral-400 text-left">
+                      <tr>
+                        <th className="px-3 py-2 font-normal">Symbol</th>
+                        <th className="px-3 py-2 font-normal">Side</th>
+                        <th className="px-3 py-2 font-normal">Status</th>
+                        <th className="px-3 py-2 font-normal text-right">My Entry</th>
+                        <th className="px-3 py-2 font-normal text-right">Now</th>
+                        <th className="px-3 py-2 font-normal text-right">P&amp;L</th>
+                        <th className="px-3 py-2 font-normal text-right">TP1</th>
+                        <th className="px-3 py-2 font-normal text-right">TP2</th>
+                        <th className="px-3 py-2 font-normal text-right text-cyan-500">TP3</th>
+                        <th className="px-3 py-2 font-normal text-right">SL</th>
+                        <th className="px-3 py-2 font-normal">Entered (WIB)</th>
+                        <th className="px-3 py-2 font-normal"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {paperTrades.map((row) => {
+                        const entry = row.paper_entry ?? row.entry_price;
+                        const close = row.outcome !== "active" ? (row.outcome_price ?? null) : (row.current_price ?? null);
+                        const pnlPct = close != null && entry > 0
+                          ? (close - entry) / entry * (row.side === "long" ? 1 : -1) * 100
+                          : null;
+                        return (
+                          <tr
+                            key={row.id}
+                            className={`border-t border-neutral-800 hover:bg-neutral-900/40 ${
+                              row.outcome !== "active" ? "opacity-70" : ""
+                            }`}
+                          >
+                            <td className="px-3 py-2 font-medium">{row.symbol}</td>
+                            <td className={`px-3 py-2 ${row.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>
+                              {row.side}
+                            </td>
+                            <td className="px-3 py-2">
+                              <TradeLifecycleBadge signal={row} currentPrice={row.current_price} />
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums text-neutral-200">
+                              {formatPrice(entry)}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums text-neutral-400">
+                              {close != null ? formatPrice(close) : "—"}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums font-medium">
+                              {pnlPct !== null ? (
+                                <span className={pnlPct >= 0 ? "text-emerald-400" : "text-red-400"}>
+                                  {pnlPct >= 0 ? "+" : ""}{pnlPct.toFixed(2)}%
+                                </span>
+                              ) : "—"}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums text-neutral-500 text-xs">
+                              {row.tp1 != null ? formatPrice(row.tp1) : "—"}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums text-neutral-500 text-xs">
+                              {row.tp2 != null ? formatPrice(row.tp2) : "—"}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums text-cyan-600 text-xs">
+                              {row.tp3 != null ? formatPrice(row.tp3) : "—"}
+                            </td>
+                            <td className="px-3 py-2 text-right tabular-nums text-xs">
+                              <TrailingSLCell row={row} />
+                            </td>
+                            <td className="px-3 py-2 text-xs text-neutral-500 tabular-nums">
+                              {row.paper_traded_at != null ? formatWib(row.paper_traded_at) : "—"}
+                            </td>
+                            <td className="px-3 py-2 whitespace-nowrap">
+                              <a href={tradingViewSymbolUrl(row.symbol, row.timeframe as import("@/lib/types").Timeframe)} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-400 hover:text-blue-300">TV</a>
+                              <a href={binanceFuturesUrl(row.symbol)} target="_blank" rel="noopener noreferrer" className="ml-3 text-xs text-amber-400 hover:text-amber-300">BN</a>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ── Auto-tracked signals ─────────────────────────────────────────── */}
+          {tracked !== null && autoTracked.length === 0 && paperTrades.length === 0 && (
             <div className="rounded-md border border-neutral-800 bg-neutral-900/20 p-6 text-center text-neutral-600 text-sm">
               No active or starred signals yet. New entries will show here automatically.
             </div>
           )}
 
-          {tracked !== null && tracked.length > 0 && (
+          {tracked !== null && autoTracked.length > 0 && (
+            <div>
+              {paperTrades.length > 0 && (
+                <h3 className="text-xs font-medium text-neutral-400 mb-2 uppercase tracking-wide">Auto-tracked</h3>
+              )}
             <div className="rounded-md border border-neutral-800 overflow-hidden">
               <div className="overflow-x-auto">
                 <table className="w-full text-sm min-w-[720px]">
@@ -677,6 +792,7 @@ function WatchlistTab({
                   </tbody>
                 </table>
               </div>
+            </div>
             </div>
           )}
         </section>
@@ -1167,11 +1283,13 @@ function colFlags(regime?: MarketRegime): ColFlags {
   return                            { showHTF: true,  showSqz: true,  hlHTF: false, hlFR: false, hlLS: false, hlSqz: false };
 }
 
-function SignalTable({ signals, regime, watched, onWatch }: {
+function SignalTable({ signals, regime, watched, onWatch, papered, onPaperTrade }: {
   signals: Signal[];
   regime?: MarketRegime;
   watched: Set<string>;
   onWatch: (id: string, holdDays: number) => void;
+  papered: Set<string>;
+  onPaperTrade: (id: string, entryPrice: number) => void;
 }) {
   if (signals.length === 0) {
     return (
@@ -1317,6 +1435,11 @@ function SignalTable({ signals, regime, watched, onWatch }: {
                   className="ml-2 text-xs text-amber-400 hover:text-amber-300" title="Open Binance Futures chart">
                   BN
                 </a>
+                <PaperButton
+                  signal={s}
+                  isPapered={papered.has(`${s.symbol}-${s.timeframe}-${s.barTime}`)}
+                  onPaperTrade={onPaperTrade}
+                />
                 <WatchButton
                   id={`${s.symbol}-${s.timeframe}-${s.barTime}`}
                   isWatched={watched.has(`${s.symbol}-${s.timeframe}-${s.barTime}`)}
@@ -1666,6 +1789,62 @@ function WatchButton({ id, isWatched, onWatch }: {
       title="Add to Tracked"
     >
       ☆
+    </button>
+  );
+}
+
+// Paper Trade button — inline price form that pops open on click (like WatchButton).
+function PaperButton({ signal, isPapered, onPaperTrade }: {
+  signal: Signal;
+  isPapered: boolean;
+  onPaperTrade: (id: string, entryPrice: number) => void;
+}) {
+  const [picking, setPicking] = useState(false);
+  const defaultPrice = signal.currentPrice ?? signal.barClose;
+  const [priceStr, setPriceStr] = useState(defaultPrice.toString());
+  const signalId = `${signal.symbol}-${signal.timeframe}-${signal.barTime}`;
+
+  if (isPapered) {
+    return <span className="ml-2 text-xs text-emerald-400" title="Logged as paper trade">◈</span>;
+  }
+  if (picking) {
+    return (
+      <span className="ml-2 inline-flex items-center gap-1 text-xs">
+        <input
+          type="number"
+          value={priceStr}
+          onChange={(e) => setPriceStr(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              const p = parseFloat(priceStr);
+              if (p > 0) { onPaperTrade(signalId, p); setPicking(false); }
+            }
+            if (e.key === "Escape") setPicking(false);
+          }}
+          autoFocus
+          className="w-24 px-1 py-0.5 rounded bg-neutral-800 border border-neutral-700 text-neutral-200 text-xs tabular-nums"
+          step="any"
+        />
+        <button
+          onClick={() => {
+            const p = parseFloat(priceStr);
+            if (p > 0) { onPaperTrade(signalId, p); setPicking(false); }
+          }}
+          className="px-1.5 py-0.5 rounded bg-emerald-900/60 text-emerald-300 border border-emerald-800/60 hover:bg-emerald-800/60"
+        >
+          ✓
+        </button>
+        <button onClick={() => setPicking(false)} className="px-1 py-0.5 text-neutral-500 hover:text-neutral-300">✕</button>
+      </span>
+    );
+  }
+  return (
+    <button
+      onClick={() => { setPriceStr((signal.currentPrice ?? signal.barClose).toString()); setPicking(true); }}
+      className="ml-2 text-xs text-neutral-600 hover:text-emerald-400 transition-colors"
+      title="Log as paper trade"
+    >
+      ◈
     </button>
   );
 }

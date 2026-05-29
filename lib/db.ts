@@ -49,7 +49,10 @@ export async function ensureSchema() {
       best_tp          TEXT,
       -- which magnet each TP snapped to: 'atr', 'vwap_daily', 'vwap_weekly'
       tp2_source       TEXT,
-      tp3_source       TEXT
+      tp3_source       TEXT,
+      -- manual paper trade fields: set when user logs a trade from the Entry tab
+      paper_traded_at  BIGINT,
+      paper_entry      REAL
     )
   `;
   // Migrations for existing tables
@@ -75,6 +78,8 @@ export async function ensureSchema() {
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS best_tp TEXT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS tp2_source TEXT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS tp3_source TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS paper_traded_at BIGINT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS paper_entry REAL`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_outcome  ON signal_log(outcome)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_bar_time ON signal_log(bar_time DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_symbol   ON signal_log(symbol)`;
@@ -153,6 +158,8 @@ export interface SignalLog {
   best_tp: string | null;
   tp2_source: string | null;
   tp3_source: string | null;
+  paper_traded_at: number | null;
+  paper_entry: number | null;
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -205,6 +212,8 @@ function normalizeSignalLog(row: unknown): SignalLog {
     best_tp: r.best_tp == null ? null : String(r.best_tp),
     tp2_source: r.tp2_source == null ? null : String(r.tp2_source),
     tp3_source: r.tp3_source == null ? null : String(r.tp3_source),
+    paper_traded_at: toNullableNumber(r.paper_traded_at),
+    paper_entry: toNullableNumber(r.paper_entry),
   };
 }
 
@@ -289,18 +298,32 @@ export async function pruneOldSignals(): Promise<number> {
 
 // Returns all signals that still need monitoring. Active signals are included
 // automatically; watched resolved signals remain visible as manual bookmarks.
+// Paper-traded signals (paper_traded_at set) are always included regardless of outcome.
 export async function getTrackedSignals(): Promise<SignalLog[]> {
   const sql = getDb();
   if (!sql) return [];
+  const cutoff7d = Date.now() - 7 * 24 * 60 * 60_000;
   const rows = await sql`
     SELECT * FROM signal_log
-    WHERE outcome = 'active' OR watched = TRUE
+    WHERE outcome = 'active'
+       OR watched = TRUE
+       OR (paper_traded_at IS NOT NULL AND bar_time > ${cutoff7d})
     ORDER BY
       CASE WHEN outcome = 'active' THEN 0 ELSE 1 END,
       bar_time DESC
-    LIMIT 100
+    LIMIT 150
   ` as unknown[];
   return (rows as unknown[]).map(normalizeSignalLog);
+}
+
+export async function markAsPaperTrade(id: string, entryPrice: number): Promise<void> {
+  const sql = getDb();
+  if (!sql) return;
+  await sql`
+    UPDATE signal_log
+    SET paper_traded_at = ${Date.now()}, paper_entry = ${entryPrice}
+    WHERE id = ${id}
+  `;
 }
 
 export async function getWatchedSignals(): Promise<SignalLog[]> {
