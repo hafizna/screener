@@ -1214,23 +1214,30 @@ function formatDuration(ms: number): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 
-// Timestamps are displayed in WIB (GMT+7, Asia/Jakarta) for readability.
+// Intl.DateTimeFormat with named timezone is unreliable in some runtimes.
+// Manual UTC+7 offset is simpler and always correct.
+function wibDate(ms: number): Date {
+  return new Date(ms + 7 * 60 * 60 * 1000);
+}
+
 function formatWib(ms: number): string {
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Jakarta",
-    month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit",
-    hour12: false,
-  }).formatToParts(new Date(ms));
-  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
-  return `${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
+  const d = wibDate(ms);
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mi = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${mm}-${dd} ${hh}:${mi}`;
 }
 
 function formatWibFull(ms: number): string {
-  return new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Asia/Jakarta",
-    dateStyle: "medium", timeStyle: "medium",
-  }).format(new Date(ms)) + " WIB";
+  const d = wibDate(ms);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mi = String(d.getUTCMinutes()).padStart(2, "0");
+  const ss = String(d.getUTCSeconds()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss} WIB`;
 }
 
 function FilterGroup({ label, children }: { label: string; children: React.ReactNode }) {
