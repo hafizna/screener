@@ -289,7 +289,7 @@ function LifecycleBoard({
 
       <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-4 items-start">
         <BoardColumn stage="radar" title="Radar" count={radar.length} accent="text-amber-300"
-          hint="Pre-signal candidates near MP levels. Not fired yet.">
+          hint="Pre-signal candidates near MP levels. Not fired yet." defaultCollapsed={true}>
           {radar.length === 0
             ? <BoardEmpty text="No live radar candidates." />
             : radar.map((r) => <RadarCard key={r.id} row={r} />)}
@@ -316,7 +316,7 @@ function LifecycleBoard({
         </BoardColumn>
 
         <BoardColumn stage="resolved" title="Resolved" count={resolved.length} accent="text-neutral-400"
-          hint="Recently closed: TP / SL / expired. Full stats in History.">
+          hint="Recently closed: TP / SL / expired. Full stats in History." defaultCollapsed={true}>
           {resolved.length === 0
             ? <BoardEmpty text="No resolved trades yet." />
             : resolved.map((t) => (
@@ -336,18 +336,29 @@ function entryDistancePct(row: BoardTrade): number {
   return Math.abs(row.current_price - row.entry_price) / row.entry_price * 100;
 }
 
-function BoardColumn({ title, count, accent, hint, children }: {
-  stage: BoardStage; title: string; count: number; accent: string; hint: string; children: React.ReactNode;
+function BoardColumn({ title, count, accent, hint, defaultCollapsed = false, children }: {
+  stage: BoardStage; title: string; count: number; accent: string; hint: string;
+  defaultCollapsed?: boolean; children: React.ReactNode;
 }) {
+  const [collapsed, setCollapsed] = useState(defaultCollapsed);
   return (
     <div className="rounded-lg border border-neutral-800 bg-neutral-900/20">
-      <div className="px-3 py-2 border-b border-neutral-800 flex items-center justify-between" title={hint}>
+      <button
+        onClick={() => setCollapsed((c) => !c)}
+        className="w-full px-3 py-2 border-b border-neutral-800 flex items-center justify-between"
+        title={hint}
+      >
         <span className={`text-sm font-medium ${accent}`}>{title}</span>
-        <span className="text-xs text-neutral-500 tabular-nums">{count}</span>
-      </div>
-      <div className="p-2 space-y-2 max-h-[70vh] overflow-y-auto">
-        {children}
-      </div>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-neutral-500 tabular-nums">{count}</span>
+          <span className="text-xs text-neutral-600">{collapsed ? "▾" : "▴"}</span>
+        </div>
+      </button>
+      {!collapsed && (
+        <div className="p-2 space-y-2 max-h-[70vh] overflow-y-auto">
+          {children}
+        </div>
+      )}
     </div>
   );
 }
