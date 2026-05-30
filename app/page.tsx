@@ -49,19 +49,6 @@ export default function DashboardPage() {
   // Board side filter (auto-nudged by regime).
   const [sideFilter, setSideFilter] = useState<BoardSideFilter>("all");
 
-  // Starred ids are persisted in localStorage so the button state survives refresh.
-  const [watched, setWatched] = useState<Set<string>>(() => {
-    if (typeof window === "undefined") return new Set();
-    try { return new Set(JSON.parse(localStorage.getItem("watched") ?? "[]") as string[]); }
-    catch { return new Set(); }
-  });
-
-  async function watchSignal(id: string, holdDays: number) {
-    const next = new Set(watched).add(id);
-    setWatched(next);
-    localStorage.setItem("watched", JSON.stringify([...next]));
-    await fetch("/api/watch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, holdDays }) }).catch(() => {});
-  }
 
   // Action log: tag a signal enter/skip to measure selection edge. Optimistic, then persist + reload.
   async function setAction(id: string, action: "enter" | "skip" | null) {
@@ -227,8 +214,6 @@ export default function DashboardPage() {
             loading={boardLoading}
             sideFilter={sideFilter}
             setSideFilter={setSideFilter}
-            watched={watched}
-            onWatch={watchSignal}
             onAction={setAction}
           />
         </>
@@ -244,14 +229,12 @@ export default function DashboardPage() {
 type BoardStage = "radar" | "fired" | "running" | "resolved";
 
 function LifecycleBoard({
-  board, loading, sideFilter, setSideFilter, watched, onWatch, onAction,
+  board, loading, sideFilter, setSideFilter, onAction,
 }: {
   board: BoardData | null;
   loading: boolean;
   sideFilter: BoardSideFilter;
   setSideFilter: (s: BoardSideFilter) => void;
-  watched: Set<string>;
-  onWatch: (id: string, holdDays: number) => void;
   onAction: (id: string, action: "enter" | "skip" | null) => void;
 }) {
   const sideOk = (s: "long" | "short") => sideFilter === "all" || s === sideFilter;
@@ -271,23 +254,23 @@ function LifecycleBoard({
   // Only live signals are traceable. Once a signal hits SL / TP3 / expires (outcome
   // != active), the trade plan is done — it drops off the board and lives in History.
   const traceable = [...running, ...fired];
-  // A starred ticker is the one the user picked to follow — it drives the trace panel
-  // by default, ahead of whatever happens to be the newest runner.
-  const isStarred = (t: BoardTrade) => t.watched || watched.has(t.id);
+  // An entered ticker is the one the user took — it drives the trace panel by default,
+  // ahead of whatever happens to be the newest runner.
+  const isEntered = (t: BoardTrade) => t.user_action === "enter";
   const selectedTrace =
     traceable.find((t) => t.id === selectedTraceId) ??
-    traceable.find(isStarred) ??
+    traceable.find(isEntered) ??
     running[0] ??
     fired[0] ??
     traceable[0] ??
     null;
 
-  // Tickers offered in the trace switcher: every starred one, plus the current
-  // selection if it was manually picked (via "trace") and isn't starred.
-  const starredTraceable = traceable.filter(isStarred);
-  const traceChoices = selectedTrace && !starredTraceable.some((t) => t.id === selectedTrace.id)
-    ? [selectedTrace, ...starredTraceable]
-    : starredTraceable;
+  // Tickers offered in the trace switcher: every entered one, plus the current
+  // selection if it was manually picked (via "trace") and isn't entered.
+  const enteredTraceable = traceable.filter(isEntered);
+  const traceChoices = selectedTrace && !enteredTraceable.some((t) => t.id === selectedTrace.id)
+    ? [selectedTrace, ...enteredTraceable]
+    : enteredTraceable;
 
   // Fired sorted: near-entry (most actionable) first.
   const firedSorted = [...fired].sort((a, b) => entryDistancePct(a) - entryDistancePct(b));
@@ -299,10 +282,10 @@ function LifecycleBoard({
       return;
     }
     if (!selectedTraceId || !traceable.some((t) => t.id === selectedTraceId)) {
-      const preferred = traceable.find(isStarred) ?? traceable[0];
+      const preferred = traceable.find(isEntered) ?? traceable[0];
       setSelectedTraceId(preferred.id);
     }
-  }, [board, selectedTraceId, traceable, watched]);
+  }, [board, selectedTraceId, traceable]);
 
   if (loading && !board) {
     return <div className="text-neutral-500 text-sm py-12 text-center">Loading board…</div>;
@@ -336,7 +319,7 @@ function LifecycleBoard({
             : firedSorted.map((t) => (
                 <TradeCard key={t.id} row={t} stage="fired"
                   onSelectTrace={setSelectedTraceId}
-                  watched={watched} onWatch={onWatch} onAction={onAction} />
+                  onAction={onAction} />
               ))}
         </BoardColumn>
 
@@ -347,13 +330,13 @@ function LifecycleBoard({
             : running.map((t) => (
                 <TradeCard key={t.id} row={t} stage="running"
                   onSelectTrace={setSelectedTraceId}
-                  watched={watched} onWatch={onWatch} onAction={onAction} />
+                  onAction={onAction} />
               ))}
         </BoardColumn>
 
         <BoardColumn stage="resolved" title="Trace" count={traceable.length} accent="text-cyan-300"
           hint="Selected ticker progress from entry across cron cycles. Resolved rows are in History.">
-          <TraceSelector items={traceChoices} selectedId={selectedTrace?.id ?? null} starredIds={watched} onSelect={setSelectedTraceId} />
+          <TraceSelector items={traceChoices} selectedId={selectedTrace?.id ?? null} onSelect={setSelectedTraceId} />
           <SignalTracePanel row={selectedTrace} resolvedCount={resolved.length} />
         </BoardColumn>
       </div>
@@ -371,16 +354,16 @@ function formatSignedPct(value: number): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
 }
 
-// Tap-to-switch chips so multiple starred tickers are all reachable in the trace panel.
-function TraceSelector({ items, selectedId, starredIds, onSelect }: {
-  items: BoardTrade[]; selectedId: string | null; starredIds: Set<string>; onSelect: (id: string) => void;
+// Tap-to-switch chips so multiple entered tickers are all reachable in the trace panel.
+function TraceSelector({ items, selectedId, onSelect }: {
+  items: BoardTrade[]; selectedId: string | null; onSelect: (id: string) => void;
 }) {
   if (items.length < 2) return null;
   return (
     <div className="mb-3 flex flex-wrap gap-1.5">
       {items.map((t) => {
         const active = t.id === selectedId;
-        const isStarred = t.watched || starredIds.has(t.id);
+        const isEntered = t.user_action === "enter";
         const pct = currentMovePct(t, t.current_price) ?? t.trace?.[t.trace.length - 1]?.move_pct ?? null;
         return (
           <button
@@ -393,7 +376,7 @@ function TraceSelector({ items, selectedId, starredIds, onSelect }: {
                 : "bg-neutral-900 border-neutral-800 text-neutral-400 hover:border-neutral-700"
             }`}
           >
-            {isStarred && <span className="text-amber-300">★</span>}
+            {isEntered && <span className="text-emerald-400">▲</span>}
             <span className="font-medium">{t.symbol}</span>
             {pct !== null && (
               <span className={pct >= 0 ? "text-emerald-400" : "text-red-400"}>{formatSignedPct(pct)}</span>
@@ -566,9 +549,8 @@ function RadarCard({ row }: { row: BoardRadar }) {
   );
 }
 
-function TradeCard({ row, stage, watched, onWatch, onAction, onSelectTrace }: {
+function TradeCard({ row, stage, onAction, onSelectTrace }: {
   row: BoardTrade; stage: BoardStage;
-  watched: Set<string>; onWatch: (id: string, holdDays: number) => void;
   onAction?: (id: string, action: "enter" | "skip" | null) => void;
   onSelectTrace?: (id: string) => void;
 }) {
@@ -592,7 +574,6 @@ function TradeCard({ row, stage, watched, onWatch, onAction, onSelectTrace }: {
           {row.symbol}
           {row.user_action === "enter" && <span className="text-emerald-400" title="You entered">▲</span>}
           {row.user_action === "skip" && <span className="text-neutral-600" title="You skipped">▽</span>}
-          {row.watched && <span className="text-amber-300" title="Starred">★</span>}
         </span>
         {stage === "fired"
           ? <ZBadge level={(row.z_level as 1 | 2 | 3) || 1} z={row.z_score} />
@@ -653,9 +634,7 @@ function TradeCard({ row, stage, watched, onWatch, onAction, onSelectTrace }: {
         {onSelectTrace && (
           <button onClick={() => onSelectTrace(row.id)} className="text-neutral-600 hover:text-cyan-300" title="Trace this ticker">trace</button>
         )}
-        {(stage === "fired" || stage === "running") && !row.watched && !watched.has(row.id) && (
-          <button onClick={() => { onWatch(row.id, 3); onSelectTrace?.(row.id); }} className="ml-auto text-neutral-600 hover:text-amber-300" title="Star & trace this ticker">☆</button>
-        )}
+
       </div>
     </CardShell>
   );
@@ -911,7 +890,6 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
                       </td>
                       <td className="px-3 py-2 font-medium">
                         {row.symbol}
-                        {row.watched && <span className="ml-1 text-amber-300 text-xs" title="Starred">★</span>}
                       </td>
                       <td className={`px-3 py-2 ${row.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>
                         {row.side}
@@ -1291,12 +1269,14 @@ function EdgeStat({ label, n, winRate }: { label: string; n: number; winRate: nu
 }
 
 function SelectionEdgePanel({ signals }: { signals: SignalLog[] }) {
-  const { all, entered, skipped } = useMemo(() => {
+  const { all, entered, notEntered } = useMemo(() => {
     const resolved = signals.filter((s) => s.outcome !== "active");
+    // Unlabeled signals count as "not entered" — with this many signals, only the
+    // ones you actually took get tagged; everything else is implicitly passed.
     return {
       all: selectionGroupStats(resolved),
       entered: selectionGroupStats(resolved.filter((s) => s.user_action === "enter")),
-      skipped: selectionGroupStats(resolved.filter((s) => s.user_action === "skip")),
+      notEntered: selectionGroupStats(resolved.filter((s) => s.user_action !== "enter")),
     };
   }, [signals]);
 
@@ -1310,10 +1290,10 @@ function SelectionEdgePanel({ signals }: { signals: SignalLog[] }) {
         <div className="grid grid-cols-3 gap-2 text-center">
           <EdgeStat label="All signals" n={all.n} winRate={all.winRate} />
           <EdgeStat label="Entered" n={entered.n} winRate={entered.winRate} />
-          <EdgeStat label="Skipped" n={skipped.n} winRate={skipped.winRate} />
+          <EdgeStat label="Not entered" n={notEntered.n} winRate={notEntered.winRate} />
         </div>
         {entered.n === 0 ? (
-          <div className="mt-3 text-xs text-neutral-500 text-center">No tagged trades yet. Mark signals enter/skip on the Board to start measuring whether your selection adds edge.</div>
+          <div className="mt-3 text-xs text-neutral-500 text-center">No entered trades yet. Tap "enter" on signals you take (everything else counts as not entered) to measure your selection edge.</div>
         ) : !enoughSample ? (
           <div className="mt-3 text-xs text-neutral-500 text-center">Tag at least 10 entered signals to measure your selection edge (entered so far: {entered.n}).</div>
         ) : delta !== null ? (
