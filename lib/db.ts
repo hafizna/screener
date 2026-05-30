@@ -343,8 +343,8 @@ export interface SignalLog {
   best_tp: string | null;
   tp2_source: string | null;
   tp3_source: string | null;
-  user_action: string | null;
-  user_action_at: number | null;
+  paper_traded_at: number | null;
+  paper_entry: number | null;
   radar_first_seen: number | null;
 }
 
@@ -429,8 +429,8 @@ function normalizeSignalLog(row: unknown): SignalLog {
     best_tp: r.best_tp == null ? null : String(r.best_tp),
     tp2_source: r.tp2_source == null ? null : String(r.tp2_source),
     tp3_source: r.tp3_source == null ? null : String(r.tp3_source),
-    user_action: typeof r.user_action === "string" ? r.user_action : null,
-    user_action_at: toNullableNumber(r.user_action_at),
+    paper_traded_at: toNullableNumber(r.paper_traded_at),
+    paper_entry: toNullableNumber(r.paper_entry),
     radar_first_seen: toNullableNumber(r.radar_first_seen),
   };
 }
