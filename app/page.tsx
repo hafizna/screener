@@ -288,6 +288,13 @@ function LifecycleBoard({
     traceable[0] ??
     null;
 
+  // Tickers offered in the trace switcher: every starred one, plus the current
+  // selection if it was manually picked (via "trace") and isn't starred.
+  const starredTraceable = traceable.filter(isStarred);
+  const traceChoices = selectedTrace && !starredTraceable.some((t) => t.id === selectedTrace.id)
+    ? [selectedTrace, ...starredTraceable]
+    : starredTraceable;
+
   // Fired sorted: near-entry (most actionable) first.
   const firedSorted = [...fired].sort((a, b) => entryDistancePct(a) - entryDistancePct(b));
 
@@ -352,6 +359,7 @@ function LifecycleBoard({
 
         <BoardColumn stage="resolved" title="Trace" count={traceable.length} accent="text-cyan-300"
           hint="Selected ticker progress from entry across cron cycles. Resolved rows are in History.">
+          <TraceSelector items={traceChoices} selectedId={selectedTrace?.id ?? null} starredIds={watched} onSelect={setSelectedTraceId} />
           <SignalTracePanel row={selectedTrace} resolvedCount={resolved.length} />
         </BoardColumn>
       </div>
@@ -367,6 +375,40 @@ function currentMovePct(row: Pick<SignalLog, "side" | "entry_price">, currentPri
 
 function formatSignedPct(value: number): string {
   return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+// Tap-to-switch chips so multiple starred tickers are all reachable in the trace panel.
+function TraceSelector({ items, selectedId, starredIds, onSelect }: {
+  items: BoardTrade[]; selectedId: string | null; starredIds: Set<string>; onSelect: (id: string) => void;
+}) {
+  if (items.length < 2) return null;
+  return (
+    <div className="mb-3 flex flex-wrap gap-1.5">
+      {items.map((t) => {
+        const active = t.id === selectedId;
+        const isStarred = t.watched || starredIds.has(t.id);
+        const pct = currentMovePct(t, t.current_price) ?? t.trace?.[t.trace.length - 1]?.move_pct ?? null;
+        return (
+          <button
+            key={t.id}
+            onClick={() => onSelect(t.id)}
+            title={`Trace ${t.symbol}`}
+            className={`px-2 py-1 text-xs rounded-md border flex items-center gap-1 ${
+              active
+                ? "bg-cyan-500/15 border-cyan-700 text-cyan-200"
+                : "bg-neutral-900 border-neutral-800 text-neutral-400 hover:border-neutral-700"
+            }`}
+          >
+            {isStarred && <span className="text-amber-300">★</span>}
+            <span className="font-medium">{t.symbol}</span>
+            {pct !== null && (
+              <span className={pct >= 0 ? "text-emerald-400" : "text-red-400"}>{formatSignedPct(pct)}</span>
+            )}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 function SignalTracePanel({ row, resolvedCount }: { row: BoardTrade | null; resolvedCount: number }) {
