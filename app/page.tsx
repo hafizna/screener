@@ -49,19 +49,6 @@ export default function DashboardPage() {
   // Board side filter (auto-nudged by regime).
   const [sideFilter, setSideFilter] = useState<BoardSideFilter>("all");
 
-  // Paper-traded signal ids: tracked per-session so the button updates immediately.
-  const [papered, setPapered] = useState<Set<string>>(new Set());
-
-  async function logPaperTrade(id: string, entryPrice: number) {
-    setPapered((prev) => new Set(prev).add(id));
-    await fetch("/api/paper-trades", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id, entryPrice }),
-    }).catch(() => {});
-    loadBoard();
-  }
-
   // Starred ids are persisted in localStorage so the button state survives refresh.
   const [watched, setWatched] = useState<Set<string>>(() => {
     if (typeof window === "undefined") return new Set();
@@ -74,6 +61,13 @@ export default function DashboardPage() {
     setWatched(next);
     localStorage.setItem("watched", JSON.stringify([...next]));
     await fetch("/api/watch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, holdDays }) }).catch(() => {});
+  }
+
+  // Action log: tag a signal enter/skip to measure selection edge. Optimistic, then persist + reload.
+  async function setAction(id: string, action: "enter" | "skip" | null) {
+    setBoard((prev) => prev ? { ...prev, tracked: prev.tracked.map((t) => t.id === id ? { ...t, user_action: action } : t) } : prev);
+    await fetch("/api/action", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, action }) }).catch(() => {});
+    loadBoard();
   }
 
   async function refresh() {
@@ -235,8 +229,7 @@ export default function DashboardPage() {
             setSideFilter={setSideFilter}
             watched={watched}
             onWatch={watchSignal}
-            papered={papered}
-            onPaperTrade={logPaperTrade}
+            onAction={setAction}
           />
         </>
       )}
@@ -251,7 +244,7 @@ export default function DashboardPage() {
 type BoardStage = "radar" | "fired" | "running" | "resolved";
 
 function LifecycleBoard({
-  board, loading, sideFilter, setSideFilter, watched, onWatch, papered, onPaperTrade,
+  board, loading, sideFilter, setSideFilter, watched, onWatch, onAction,
 }: {
   board: BoardData | null;
   loading: boolean;
@@ -259,8 +252,7 @@ function LifecycleBoard({
   setSideFilter: (s: BoardSideFilter) => void;
   watched: Set<string>;
   onWatch: (id: string, holdDays: number) => void;
-  papered: Set<string>;
-  onPaperTrade: (id: string, entryPrice: number) => void;
+  onAction: (id: string, action: "enter" | "skip" | null) => void;
 }) {
   const sideOk = (s: "long" | "short") => sideFilter === "all" || s === sideFilter;
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
@@ -272,7 +264,7 @@ function LifecycleBoard({
   // Fired = active, no TP yet. Running = active, already hit ≥ TP1.
   const fired = tracked.filter((t) => t.outcome === "active" && t.best_tp == null);
   const running = tracked.filter((t) => t.outcome === "active" && t.best_tp != null);
-  // A tracked row can also be resolved-but-starred/paper; fold those into resolved.
+  // A tracked row can also be resolved-but-starred; fold those into resolved.
   const resolvedFromTracked = tracked.filter((t) => t.outcome !== "active");
   const resolvedIds = new Set(resolvedFromTracked.map((r) => r.id));
   const resolved = [...resolvedFromTracked, ...resolvedAll.filter((r) => !resolvedIds.has(r.id))];
@@ -344,7 +336,7 @@ function LifecycleBoard({
             : firedSorted.map((t) => (
                 <TradeCard key={t.id} row={t} stage="fired"
                   onSelectTrace={setSelectedTraceId}
-                  watched={watched} onWatch={onWatch} papered={papered} onPaperTrade={onPaperTrade} />
+                  watched={watched} onWatch={onWatch} onAction={onAction} />
               ))}
         </BoardColumn>
 
@@ -355,7 +347,7 @@ function LifecycleBoard({
             : running.map((t) => (
                 <TradeCard key={t.id} row={t} stage="running"
                   onSelectTrace={setSelectedTraceId}
-                  watched={watched} onWatch={onWatch} papered={papered} onPaperTrade={onPaperTrade} />
+                  watched={watched} onWatch={onWatch} onAction={onAction} />
               ))}
         </BoardColumn>
 
@@ -574,21 +566,18 @@ function RadarCard({ row }: { row: BoardRadar }) {
   );
 }
 
-function TradeCard({ row, stage, watched, onWatch, papered, onPaperTrade, onSelectTrace }: {
+function TradeCard({ row, stage, watched, onWatch, onAction, onSelectTrace }: {
   row: BoardTrade; stage: BoardStage;
   watched: Set<string>; onWatch: (id: string, holdDays: number) => void;
-  papered: Set<string>; onPaperTrade: (id: string, entryPrice: number) => void;
+  onAction?: (id: string, action: "enter" | "skip" | null) => void;
   onSelectTrace?: (id: string) => void;
 }) {
   const v = stage === "fired" ? boardViability(row) : null;
   const isResolved = row.outcome !== "active";
-  const paperEntry = row.paper_entry;
   const closePx = isResolved ? row.outcome_price : row.current_price;
-  const pnlBase = paperEntry ?? row.entry_price;
-  const pnlPct = closePx != null && pnlBase > 0
-    ? (closePx - pnlBase) / pnlBase * (row.side === "long" ? 1 : -1) * 100
+  const pnlPct = closePx != null && row.entry_price > 0
+    ? (closePx - row.entry_price) / row.entry_price * (row.side === "long" ? 1 : -1) * 100
     : null;
-  const isPapered = paperEntry != null || papered.has(row.id);
 
   const ring =
     stage === "running" ? "border-emerald-900/50 bg-emerald-950/10"
@@ -601,7 +590,8 @@ function TradeCard({ row, stage, watched, onWatch, papered, onPaperTrade, onSele
       <div className="flex items-center justify-between mb-1">
         <span className="font-medium text-sm flex items-center gap-1">
           {row.symbol}
-          {isPapered && <span className="text-emerald-400" title="Paper-traded">◈</span>}
+          {row.user_action === "enter" && <span className="text-emerald-400" title="You entered">▲</span>}
+          {row.user_action === "skip" && <span className="text-neutral-600" title="You skipped">▽</span>}
           {row.watched && <span className="text-amber-300" title="Starred">★</span>}
         </span>
         {stage === "fired"
@@ -617,7 +607,7 @@ function TradeCard({ row, stage, watched, onWatch, papered, onPaperTrade, onSele
       </div>
 
       <div className="flex justify-between text-neutral-500">
-        <span>entry <span className="text-neutral-300">{formatPrice(paperEntry ?? row.entry_price)}</span></span>
+        <span>entry <span className="text-neutral-300">{formatPrice(row.entry_price)}</span></span>
         {row.current_price != null && !isResolved && (
           <span>now <span className="text-neutral-300">{formatPrice(row.current_price)}</span></span>
         )}
@@ -646,8 +636,19 @@ function TradeCard({ row, stage, watched, onWatch, papered, onPaperTrade, onSele
       <div className="mt-1.5 flex items-center gap-3">
         <a href={tradingViewSymbolUrl(row.symbol, row.timeframe as Timeframe)} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">TV</a>
         <a href={binanceFuturesUrl(row.symbol)} target="_blank" rel="noopener noreferrer" className="text-amber-400 hover:text-amber-300">BN</a>
-        {(stage === "fired" || stage === "running") && !isPapered && (
-          <PaperTradeQuickButton row={row} onPaperTrade={onPaperTrade} />
+        {(stage === "fired" || stage === "running") && onAction && (
+          <span className="inline-flex items-center gap-2">
+            <button
+              onClick={() => onAction(row.id, row.user_action === "enter" ? null : "enter")}
+              className={row.user_action === "enter" ? "text-emerald-300" : "text-neutral-600 hover:text-emerald-300"}
+              title="I entered this trade"
+            >enter</button>
+            <button
+              onClick={() => onAction(row.id, row.user_action === "skip" ? null : "skip")}
+              className={row.user_action === "skip" ? "text-red-300" : "text-neutral-600 hover:text-red-300"}
+              title="I skipped this signal"
+            >skip</button>
+          </span>
         )}
         {onSelectTrace && (
           <button onClick={() => onSelectTrace(row.id)} className="text-neutral-600 hover:text-cyan-300" title="Trace this ticker">trace</button>
@@ -855,6 +856,8 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
         <HistoryBreakdown title="Side" rows={sideRows} />
         <HistoryBreakdown title="Regime" rows={regimeRows} />
       </div>
+
+      <SelectionEdgePanel signals={signals} />
 
       <CrossTab signals={confidenceSignals} />
 
@@ -1178,6 +1181,71 @@ function cellTooltip(c: CrossCell): string | undefined {
   const mfe = cellAvgMfe(c);
   const mae = cellAvgMae(c);
   return `N=${n} | Win ${wr}% | ${c.wins}W ${c.losses}L ${c.expired}Exp | Avg MFE ${mfe !== null ? mfe.toFixed(2) : "—"}% | Avg MAE ${mae !== null ? mae.toFixed(2) : "—"}%`;
+}
+
+// Selection edge: does the user's manual enter/skip tagging beat trading every signal?
+// Same win-rate definition as the cross-tab (wins/(wins+losses+expired), active excluded).
+function selectionGroupStats(rows: SignalLog[]): { n: number; winRate: number | null } {
+  let wins = 0, losses = 0, expired = 0;
+  for (const r of rows) {
+    if (r.outcome === "tp1" || r.outcome === "tp2" || r.outcome === "tp3") wins++;
+    else if (r.outcome === "sl") losses++;
+    else if (r.outcome === "expired") expired++;
+  }
+  const n = wins + losses + expired;
+  return { n, winRate: n ? Math.round(wins / n * 100) : null };
+}
+
+function EdgeStat({ label, n, winRate }: { label: string; n: number; winRate: number | null }) {
+  const color = winRate === null ? "text-neutral-600"
+    : winRate >= 55 ? "text-emerald-300"
+    : winRate <= 35 ? "text-red-300"
+    : "text-neutral-200";
+  return (
+    <div className="rounded-md border border-neutral-800 bg-neutral-900/40 px-2 py-2">
+      <div className="text-[10px] uppercase tracking-wide text-neutral-500">{label}</div>
+      <div className={`mt-0.5 text-lg font-medium tabular-nums ${color}`}>{winRate !== null ? `${winRate}%` : "—"}</div>
+      <div className="text-[10px] text-neutral-500">N={n}</div>
+    </div>
+  );
+}
+
+function SelectionEdgePanel({ signals }: { signals: SignalLog[] }) {
+  const { all, entered, skipped } = useMemo(() => {
+    const resolved = signals.filter((s) => s.outcome !== "active");
+    return {
+      all: selectionGroupStats(resolved),
+      entered: selectionGroupStats(resolved.filter((s) => s.user_action === "enter")),
+      skipped: selectionGroupStats(resolved.filter((s) => s.user_action === "skip")),
+    };
+  }, [signals]);
+
+  const enoughSample = entered.n >= 10;
+  const delta = entered.winRate !== null && all.winRate !== null ? entered.winRate - all.winRate : null;
+
+  return (
+    <div className="mb-4 rounded-md border border-neutral-800 bg-neutral-900/30 overflow-hidden">
+      <div className="px-3 py-2 text-xs uppercase tracking-wide text-neutral-500 border-b border-neutral-800">Selection edge</div>
+      <div className="p-3">
+        <div className="grid grid-cols-3 gap-2 text-center">
+          <EdgeStat label="All signals" n={all.n} winRate={all.winRate} />
+          <EdgeStat label="Entered" n={entered.n} winRate={entered.winRate} />
+          <EdgeStat label="Skipped" n={skipped.n} winRate={skipped.winRate} />
+        </div>
+        {entered.n === 0 ? (
+          <div className="mt-3 text-xs text-neutral-500 text-center">No tagged trades yet. Mark signals enter/skip on the Board to start measuring whether your selection adds edge.</div>
+        ) : !enoughSample ? (
+          <div className="mt-3 text-xs text-neutral-500 text-center">Tag at least 10 entered signals to measure your selection edge (entered so far: {entered.n}).</div>
+        ) : delta !== null ? (
+          <div className="mt-3 text-center text-sm">
+            <span className="text-neutral-400">Your picks: </span>
+            <span className={delta >= 0 ? "text-emerald-400" : "text-red-400"}>{delta >= 0 ? "+" : ""}{delta} pts</span>
+            <span className="text-neutral-400"> vs trading everything</span>
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
 }
 
 function CrossTab({ signals }: { signals: SignalLog[] }) {

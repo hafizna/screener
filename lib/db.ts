@@ -138,6 +138,8 @@ export async function ensureSchema() {
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS tp3_source TEXT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS paper_traded_at BIGINT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS paper_entry REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS user_action TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS user_action_at BIGINT`;
   // Genealogy: when a fired signal was on the radar first, this records when the
   // radar candidate was initially detected — so the board can trace radar → fired.
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS radar_first_seen BIGINT`;
@@ -343,8 +345,8 @@ export interface SignalLog {
   best_tp: string | null;
   tp2_source: string | null;
   tp3_source: string | null;
-  paper_traded_at: number | null;
-  paper_entry: number | null;
+  user_action: string | null;
+  user_action_at: number | null;
   radar_first_seen: number | null;
 }
 
@@ -429,8 +431,8 @@ function normalizeSignalLog(row: unknown): SignalLog {
     best_tp: r.best_tp == null ? null : String(r.best_tp),
     tp2_source: r.tp2_source == null ? null : String(r.tp2_source),
     tp3_source: r.tp3_source == null ? null : String(r.tp3_source),
-    paper_traded_at: toNullableNumber(r.paper_traded_at),
-    paper_entry: toNullableNumber(r.paper_entry),
+    user_action: typeof r.user_action === "string" ? r.user_action : null,
+    user_action_at: toNullableNumber(r.user_action_at),
     radar_first_seen: toNullableNumber(r.radar_first_seen),
   };
 }
@@ -703,12 +705,10 @@ export async function getSignalTraceSnapshots(signalIds: string[], limitPerSigna
 export async function getTrackedSignals(): Promise<SignalLog[]> {
   const sql = getDb();
   if (!sql) return [];
-  const cutoff7d = Date.now() - 7 * 24 * 60 * 60_000;
   const rows = await sql`
     SELECT * FROM signal_log
     WHERE outcome = 'active'
        OR watched = TRUE
-       OR (paper_traded_at IS NOT NULL AND bar_time > ${cutoff7d})
     ORDER BY
       CASE WHEN outcome = 'active' THEN 0 ELSE 1 END,
       bar_time DESC
@@ -717,12 +717,12 @@ export async function getTrackedSignals(): Promise<SignalLog[]> {
   return (rows as unknown[]).map(normalizeSignalLog);
 }
 
-export async function markAsPaperTrade(id: string, entryPrice: number): Promise<void> {
+export async function setSignalAction(id: string, action: "enter" | "skip" | null): Promise<void> {
   const sql = getDb();
   if (!sql) return;
   await sql`
     UPDATE signal_log
-    SET paper_traded_at = ${Date.now()}, paper_entry = ${entryPrice}
+    SET user_action = ${action}, user_action_at = ${action ? Date.now() : null}
     WHERE id = ${id}
   `;
 }
