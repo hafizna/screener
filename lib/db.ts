@@ -1,10 +1,12 @@
 import { neon } from "@neondatabase/serverless";
 import type { Signal } from "./types";
+import { MODEL_PARAMS_HASH, MODEL_PARAMS_JSON, MODEL_VERSION } from "./model";
 
 const SIGNAL_RETENTION_DAYS = Math.max(
   1,
   parseInt(process.env.SIGNAL_RETENTION_DAYS ?? "14", 10) || 14
 );
+const SIGNAL_PRUNE_ENABLED = process.env.SIGNAL_PRUNE_ENABLED === "true";
 
 function getDb() {
   const url = process.env.DATABASE_URL;
@@ -24,22 +26,48 @@ export async function ensureSchema() {
       side             TEXT NOT NULL,
       signal_type      TEXT,
       regime           TEXT,
+      model_version    TEXT NOT NULL DEFAULT 'v1',
+      model_params_hash TEXT,
+      model_params     JSONB,
       entry_price      REAL NOT NULL,
       tp1              REAL,
       tp2              REAL,
       tp3              REAL,
       sl               REAL,
+      trigger_price    REAL,
       trigger_level    TEXT,
       z_level          INTEGER,
       z_score          REAL,
       squeeze_score    INTEGER,
+      bias_1h          TEXT,
+      bias_4h          TEXT,
+      bias_score_1h    REAL,
+      bias_score_4h    REAL,
       funding_rate     REAL,
+      fr_bias          TEXT,
+      oi_change_pct    REAL,
+      oi_bias          TEXT,
       long_short_ratio REAL,
+      ls_bias          TEXT,
+      relative_strength REAL,
+      rs_bias          TEXT,
+      taker_buy_ratio  REAL,
+      delta_bias       TEXT,
+      atr_1h           REAL,
+      bar_high         REAL,
+      bar_low          REAL,
+      distance_from_level REAL,
+      near_vwap        BOOLEAN,
+      near_weekly_vwap BOOLEAN,
+      near_pdh         BOOLEAN,
+      near_pdl         BOOLEAN,
+      from_watchlist   BOOLEAN NOT NULL DEFAULT FALSE,
       bar_time         BIGINT NOT NULL,
       scanned_at       BIGINT NOT NULL,
       outcome          TEXT NOT NULL DEFAULT 'active',
       outcome_at       BIGINT,
       outcome_price    REAL,
+      outcome_detail   TEXT,
       max_favorable    REAL,
       max_adverse      REAL,
       -- watchlist fields
@@ -60,19 +88,45 @@ export async function ensureSchema() {
   // Migrations for existing tables
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS signal_type TEXT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS regime TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS model_version TEXT NOT NULL DEFAULT 'v1'`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS model_params_hash TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS model_params JSONB`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS tp1 REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS tp2 REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS tp3 REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS sl REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS trigger_price REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS trigger_level TEXT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS z_level INTEGER`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS z_score REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS squeeze_score INTEGER`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS bias_1h TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS bias_4h TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS bias_score_1h REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS bias_score_4h REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS funding_rate REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS fr_bias TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS oi_change_pct REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS oi_bias TEXT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS long_short_ratio REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS ls_bias TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS relative_strength REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS rs_bias TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS taker_buy_ratio REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS delta_bias TEXT`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS atr_1h REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS bar_high REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS bar_low REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS distance_from_level REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS near_vwap BOOLEAN`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS near_weekly_vwap BOOLEAN`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS near_pdh BOOLEAN`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS near_pdl BOOLEAN`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS from_watchlist BOOLEAN NOT NULL DEFAULT FALSE`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS outcome TEXT NOT NULL DEFAULT 'active'`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS outcome_at BIGINT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS outcome_price REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS outcome_detail TEXT`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS max_favorable REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS max_adverse REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS watched BOOLEAN NOT NULL DEFAULT FALSE`;
@@ -88,6 +142,7 @@ export async function ensureSchema() {
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_outcome  ON signal_log(outcome)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_bar_time ON signal_log(bar_time DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_symbol   ON signal_log(symbol)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_sl_model    ON signal_log(model_version, model_params_hash)`;
 
   // ── radar_log: live pre-signal candidates ──────────────────────────────────
   // One row per symbol+side+timeframe candidate, upserted each scan. Keeps a
@@ -121,6 +176,56 @@ export async function ensureSchema() {
   `;
   await sql`CREATE INDEX IF NOT EXISTS idx_radar_last_seen ON radar_log(last_seen_at DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_radar_fired     ON radar_log(fired)`;
+  await sql`
+    CREATE TABLE IF NOT EXISTS signal_outcome_events (
+      id              BIGSERIAL PRIMARY KEY,
+      signal_id       TEXT NOT NULL REFERENCES signal_log(id) ON DELETE CASCADE,
+      event_type      TEXT NOT NULL,
+      outcome         TEXT,
+      outcome_at      BIGINT,
+      outcome_price   REAL,
+      max_favorable   REAL,
+      max_adverse     REAL,
+      detail          TEXT,
+      observed_at     BIGINT NOT NULL,
+      model_version   TEXT,
+      model_params_hash TEXT,
+      UNIQUE(signal_id, event_type, outcome, outcome_at)
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS scan_funnel_log (
+      scanned_at           BIGINT PRIMARY KEY,
+      model_version        TEXT NOT NULL,
+      model_params_hash    TEXT,
+      regime               TEXT,
+      symbols_scanned      INTEGER NOT NULL,
+      symbols_errored      INTEGER NOT NULL,
+      entry_candidates_15m INTEGER NOT NULL,
+      entry_candidates_1h  INTEGER NOT NULL,
+      passed_z             INTEGER NOT NULL,
+      passed_bias          INTEGER NOT NULL,
+      fired                INTEGER NOT NULL,
+      watch_candidates     INTEGER NOT NULL,
+      duration_ms          INTEGER NOT NULL
+    )
+  `;
+  await sql`
+    CREATE TABLE IF NOT EXISTS signal_trace_snapshots (
+      id            BIGSERIAL PRIMARY KEY,
+      signal_id     TEXT NOT NULL REFERENCES signal_log(id) ON DELETE CASCADE,
+      observed_at   BIGINT NOT NULL,
+      price         REAL NOT NULL,
+      move_pct      REAL NOT NULL,
+      best_tp       TEXT,
+      outcome       TEXT NOT NULL,
+      detail        TEXT,
+      UNIQUE(signal_id, observed_at)
+    )
+  `;
+  await sql`CREATE INDEX IF NOT EXISTS idx_soe_signal  ON signal_outcome_events(signal_id, observed_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_sfl_model   ON scan_funnel_log(model_version, scanned_at DESC)`;
+  await sql`CREATE INDEX IF NOT EXISTS idx_sts_signal  ON signal_trace_snapshots(signal_id, observed_at DESC)`;
 }
 
 // ─── Write path ───────────────────────────────────────────────────────────────
@@ -129,19 +234,33 @@ export async function insertSignal(s: Signal, scannedAt: number, regime?: string
   if (!sql) return false;
   const rows = await sql`
     INSERT INTO signal_log
-      (id, symbol, timeframe, side, signal_type, regime, entry_price,
-       tp1, tp2, tp3, sl, trigger_level, z_level, z_score, squeeze_score,
-       funding_rate, long_short_ratio, bar_time, scanned_at,
+      (id, symbol, timeframe, side, signal_type, regime, model_version,
+       model_params_hash, model_params, entry_price, tp1, tp2, tp3, sl,
+       trigger_price, trigger_level, z_level, z_score, squeeze_score,
+       bias_1h, bias_4h, bias_score_1h, bias_score_4h, funding_rate,
+       fr_bias, oi_change_pct, oi_bias, long_short_ratio, ls_bias,
+       relative_strength, rs_bias, taker_buy_ratio, delta_bias, atr_1h,
+       bar_high, bar_low, distance_from_level, near_vwap, near_weekly_vwap,
+       near_pdh, near_pdl, from_watchlist, bar_time, scanned_at,
        tp2_source, tp3_source, radar_first_seen)
     VALUES (
       ${`${s.symbol}-${s.timeframe}-${s.barTime}`},
       ${s.symbol}, ${s.timeframe}, ${s.side},
-      ${s.signalType ?? null}, ${regime ?? null},
+      ${s.signalType ?? null}, ${regime ?? null}, ${MODEL_VERSION},
+      ${MODEL_PARAMS_HASH}, ${MODEL_PARAMS_JSON}::jsonb,
       ${s.barClose},
       ${s.tp1 ?? null}, ${s.tp2 ?? null}, ${s.tp3 ?? null}, ${s.sl ?? null},
-      ${s.triggerLevel}, ${s.zLevel}, ${s.zScore},
+      ${s.triggerPrice}, ${s.triggerLevel}, ${s.zLevel}, ${s.zScore},
       ${s.squeezeScore ?? null},
-      ${s.fundingRate ?? null}, ${s.longShortRatio ?? null},
+      ${s.bias1h ?? null}, ${s.bias4h ?? null}, ${s.biasScore1h ?? null},
+      ${s.biasScore4h ?? null}, ${s.fundingRate ?? null}, ${s.frBias ?? null},
+      ${s.oiChangePct ?? null}, ${s.oiBias ?? null},
+      ${s.longShortRatio ?? null}, ${s.lsBias ?? null},
+      ${s.relativeStrength ?? null}, ${s.rsBias ?? null},
+      ${s.takerBuyRatio ?? null}, ${s.deltaBias ?? null}, ${s.atr1h ?? null},
+      ${s.barHigh ?? null}, ${s.barLow ?? null}, ${s.distanceFromLevel ?? null},
+      ${s.nearVwap ?? null}, ${s.nearWeeklyVwap ?? null}, ${s.nearPdh ?? null},
+      ${s.nearPdl ?? null}, ${s.fromWatchlist ?? false},
       ${s.barTime}, ${scannedAt},
       ${s.tp2Source ?? null}, ${s.tp3Source ?? null},
       ${radarFirstSeen ?? null}
@@ -174,22 +293,47 @@ export interface SignalLog {
   side: "long" | "short";
   signal_type: string | null;
   regime: string | null;
+  model_version: string;
+  model_params_hash: string | null;
   entry_price: number;
   tp1: number | null;
   tp2: number | null;
   tp3: number | null;
   sl: number | null;
+  trigger_price: number | null;
   trigger_level: string;
   z_level: number;
   z_score: number;
   squeeze_score: number | null;
+  bias_1h: string | null;
+  bias_4h: string | null;
+  bias_score_1h: number | null;
+  bias_score_4h: number | null;
   funding_rate: number | null;
+  fr_bias: string | null;
+  oi_change_pct: number | null;
+  oi_bias: string | null;
   long_short_ratio: number | null;
+  ls_bias: string | null;
+  relative_strength: number | null;
+  rs_bias: string | null;
+  taker_buy_ratio: number | null;
+  delta_bias: string | null;
+  atr_1h: number | null;
+  bar_high: number | null;
+  bar_low: number | null;
+  distance_from_level: number | null;
+  near_vwap: boolean | null;
+  near_weekly_vwap: boolean | null;
+  near_pdh: boolean | null;
+  near_pdl: boolean | null;
+  from_watchlist: boolean;
   bar_time: number;
   scanned_at: number;
   outcome: Outcome;
   outcome_at: number | null;
   outcome_price: number | null;
+  outcome_detail: string | null;
   max_favorable: number | null;
   max_adverse: number | null;
   watched: boolean;
@@ -214,6 +358,12 @@ function toNullableNumber(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+function toNullableBoolean(value: unknown): boolean | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "boolean") return value;
+  return String(value).toLowerCase() === "true";
+}
+
 function toOutcome(value: unknown): Outcome {
   return value === "tp1" || value === "tp2" || value === "tp3" || value === "sl" || value === "expired" || value === "active"
     ? value
@@ -229,22 +379,47 @@ function normalizeSignalLog(row: unknown): SignalLog {
     side: r.side === "short" ? "short" : "long",
     signal_type: r.signal_type == null ? null : String(r.signal_type),
     regime: r.regime == null ? null : String(r.regime),
+    model_version: r.model_version == null ? "v1" : String(r.model_version),
+    model_params_hash: r.model_params_hash == null ? null : String(r.model_params_hash),
     entry_price: toNumber(r.entry_price),
     tp1: toNullableNumber(r.tp1),
     tp2: toNullableNumber(r.tp2),
     tp3: toNullableNumber(r.tp3),
     sl: toNullableNumber(r.sl),
+    trigger_price: toNullableNumber(r.trigger_price),
     trigger_level: String(r.trigger_level ?? ""),
     z_level: toNumber(r.z_level),
     z_score: toNumber(r.z_score),
     squeeze_score: toNullableNumber(r.squeeze_score),
+    bias_1h: r.bias_1h == null ? null : String(r.bias_1h),
+    bias_4h: r.bias_4h == null ? null : String(r.bias_4h),
+    bias_score_1h: toNullableNumber(r.bias_score_1h),
+    bias_score_4h: toNullableNumber(r.bias_score_4h),
     funding_rate: toNullableNumber(r.funding_rate),
+    fr_bias: r.fr_bias == null ? null : String(r.fr_bias),
+    oi_change_pct: toNullableNumber(r.oi_change_pct),
+    oi_bias: r.oi_bias == null ? null : String(r.oi_bias),
     long_short_ratio: toNullableNumber(r.long_short_ratio),
+    ls_bias: r.ls_bias == null ? null : String(r.ls_bias),
+    relative_strength: toNullableNumber(r.relative_strength),
+    rs_bias: r.rs_bias == null ? null : String(r.rs_bias),
+    taker_buy_ratio: toNullableNumber(r.taker_buy_ratio),
+    delta_bias: r.delta_bias == null ? null : String(r.delta_bias),
+    atr_1h: toNullableNumber(r.atr_1h),
+    bar_high: toNullableNumber(r.bar_high),
+    bar_low: toNullableNumber(r.bar_low),
+    distance_from_level: toNullableNumber(r.distance_from_level),
+    near_vwap: toNullableBoolean(r.near_vwap),
+    near_weekly_vwap: toNullableBoolean(r.near_weekly_vwap),
+    near_pdh: toNullableBoolean(r.near_pdh),
+    near_pdl: toNullableBoolean(r.near_pdl),
+    from_watchlist: Boolean(r.from_watchlist),
     bar_time: toNumber(r.bar_time),
     scanned_at: toNumber(r.scanned_at),
     outcome: toOutcome(r.outcome),
     outcome_at: toNullableNumber(r.outcome_at),
     outcome_price: toNullableNumber(r.outcome_price),
+    outcome_detail: r.outcome_detail == null ? null : String(r.outcome_detail),
     max_favorable: toNullableNumber(r.max_favorable),
     max_adverse: toNullableNumber(r.max_adverse),
     watched: Boolean(r.watched),
@@ -278,23 +453,71 @@ export async function updateOutcome(
   outcomePrice: number,
   maxFavorable: number,
   maxAdverse: number,
+  outcomeDetail: string,
 ) {
   const sql = getDb();
   if (!sql) return;
   await sql`
-    UPDATE signal_log
-    SET outcome = ${outcome}, outcome_at = ${outcomeAt},
-        outcome_price = ${outcomePrice},
-        max_favorable = ${maxFavorable}, max_adverse = ${maxAdverse}
-    WHERE id = ${id}
+    WITH updated AS (
+      UPDATE signal_log
+      SET outcome = ${outcome}, outcome_at = ${outcomeAt},
+          outcome_price = ${outcomePrice},
+          outcome_detail = ${outcomeDetail},
+          max_favorable = ${maxFavorable}, max_adverse = ${maxAdverse}
+      WHERE id = ${id}
+        AND outcome = 'active'
+      RETURNING id, model_version, model_params_hash
+    )
+    INSERT INTO signal_outcome_events
+      (signal_id, event_type, outcome, outcome_at, outcome_price, max_favorable,
+       max_adverse, detail, observed_at, model_version, model_params_hash)
+    SELECT id, 'terminal', ${outcome}, ${outcomeAt}, ${outcomePrice}, ${maxFavorable},
+           ${maxAdverse}, ${outcomeDetail}, ${Date.now()}, model_version, model_params_hash
+    FROM updated
+    ON CONFLICT (signal_id, event_type, outcome, outcome_at) DO NOTHING
   `;
 }
 
 // Update best_tp without finalizing the outcome — signal stays "active" for re-checking.
-export async function updateBestTP(id: string, bestTP: string) {
+export async function updateBestTP(
+  id: string,
+  bestTP: string,
+  outcomeAt?: number,
+  outcomePrice?: number,
+  maxFavorable?: number,
+  maxAdverse?: number,
+  detail?: string,
+) {
   const sql = getDb();
   if (!sql) return;
-  await sql`UPDATE signal_log SET best_tp = ${bestTP} WHERE id = ${id} AND outcome = 'active'`;
+  await sql`
+    WITH updated AS (
+      UPDATE signal_log
+      SET best_tp = ${bestTP}
+      WHERE id = ${id}
+        AND outcome = 'active'
+        AND CASE COALESCE(best_tp, '')
+          WHEN 'tp3' THEN 3
+          WHEN 'tp2' THEN 2
+          WHEN 'tp1' THEN 1
+          ELSE 0
+        END < CASE ${bestTP}
+          WHEN 'tp3' THEN 3
+          WHEN 'tp2' THEN 2
+          WHEN 'tp1' THEN 1
+          ELSE 0
+        END
+      RETURNING id, model_version, model_params_hash
+    )
+    INSERT INTO signal_outcome_events
+      (signal_id, event_type, outcome, outcome_at, outcome_price, max_favorable,
+       max_adverse, detail, observed_at, model_version, model_params_hash)
+    SELECT id, 'progress', ${bestTP}, ${outcomeAt ?? null}, ${outcomePrice ?? null},
+           ${maxFavorable ?? null}, ${maxAdverse ?? null}, ${detail ?? `${bestTP}_hit_running`},
+           ${Date.now()}, model_version, model_params_hash
+    FROM updated
+    ON CONFLICT (signal_id, event_type, outcome, outcome_at) DO NOTHING
+  `;
 }
 
 // Expire non-watched signals after 72h, watched signals after their custom window.
@@ -306,20 +529,40 @@ export async function expireOldSignals() {
   // Regular (unwatched) signals: expire after 72h.
   // If best_tp was set (TP1/TP2 hit while running), lock in that outcome instead of "expired".
   await sql`
-    UPDATE signal_log
-    SET outcome = COALESCE(best_tp, 'expired'), outcome_at = ${now}
-    WHERE outcome = 'active'
-      AND watched = FALSE
-      AND bar_time < ${cutoff72h}
+    WITH updated AS (
+      UPDATE signal_log
+      SET outcome = COALESCE(best_tp, 'expired'),
+          outcome_at = ${now},
+          outcome_detail = CASE WHEN best_tp IS NULL THEN 'timeout_72h' ELSE 'timeout_after_best_tp' END
+      WHERE outcome = 'active'
+        AND watched = FALSE
+        AND bar_time < ${cutoff72h}
+      RETURNING id, outcome, outcome_at, outcome_detail, model_version, model_params_hash
+    )
+    INSERT INTO signal_outcome_events
+      (signal_id, event_type, outcome, outcome_at, detail, observed_at, model_version, model_params_hash)
+    SELECT id, 'expiry', outcome, outcome_at, outcome_detail, ${now}, model_version, model_params_hash
+    FROM updated
+    ON CONFLICT (signal_id, event_type, outcome, outcome_at) DO NOTHING
   `;
   // Watched signals: expire when their custom watch window closes
   await sql`
-    UPDATE signal_log
-    SET outcome = COALESCE(best_tp, 'expired'), outcome_at = ${now}
-    WHERE outcome = 'active'
-      AND watched = TRUE
-      AND watch_expires_at IS NOT NULL
-      AND watch_expires_at < ${now}
+    WITH updated AS (
+      UPDATE signal_log
+      SET outcome = COALESCE(best_tp, 'expired'),
+          outcome_at = ${now},
+          outcome_detail = CASE WHEN best_tp IS NULL THEN 'watch_window_expired' ELSE 'watch_window_after_best_tp' END
+      WHERE outcome = 'active'
+        AND watched = TRUE
+        AND watch_expires_at IS NOT NULL
+        AND watch_expires_at < ${now}
+      RETURNING id, outcome, outcome_at, outcome_detail, model_version, model_params_hash
+    )
+    INSERT INTO signal_outcome_events
+      (signal_id, event_type, outcome, outcome_at, detail, observed_at, model_version, model_params_hash)
+    SELECT id, 'expiry', outcome, outcome_at, outcome_detail, ${now}, model_version, model_params_hash
+    FROM updated
+    ON CONFLICT (signal_id, event_type, outcome, outcome_at) DO NOTHING
   `;
 }
 
@@ -328,6 +571,7 @@ export async function expireOldSignals() {
 export async function pruneOldSignals(): Promise<number> {
   const sql = getDb();
   if (!sql) return 0;
+  if (!SIGNAL_PRUNE_ENABLED) return 0;
   const cutoff = Date.now() - SIGNAL_RETENTION_DAYS * 24 * 60 * 60_000;
   const rows = await sql`
     DELETE FROM signal_log
@@ -335,6 +579,117 @@ export async function pruneOldSignals(): Promise<number> {
     RETURNING id
   ` as Array<{ id: string }>;
   return rows.length;
+}
+
+export interface ScanFunnel {
+  scannedAt: number;
+  regime?: string;
+  symbolsScanned: number;
+  symbolsErrored: number;
+  entryCandidates15m: number;
+  entryCandidates1h: number;
+  passedZ: number;
+  passedBias: number;
+  fired: number;
+  watchCandidates: number;
+  durationMs: number;
+}
+
+export interface SignalTraceSnapshot {
+  signal_id: string;
+  observed_at: number;
+  price: number;
+  move_pct: number;
+  best_tp: string | null;
+  outcome: Outcome;
+  detail: string | null;
+}
+
+export async function insertScanFunnel(funnel: ScanFunnel): Promise<boolean> {
+  const sql = getDb();
+  if (!sql) return false;
+  const rows = await sql`
+    INSERT INTO scan_funnel_log
+      (scanned_at, model_version, model_params_hash, regime, symbols_scanned,
+       symbols_errored, entry_candidates_15m, entry_candidates_1h, passed_z,
+       passed_bias, fired, watch_candidates, duration_ms)
+    VALUES (
+      ${funnel.scannedAt}, ${MODEL_VERSION}, ${MODEL_PARAMS_HASH}, ${funnel.regime ?? null},
+      ${funnel.symbolsScanned}, ${funnel.symbolsErrored}, ${funnel.entryCandidates15m},
+      ${funnel.entryCandidates1h}, ${funnel.passedZ}, ${funnel.passedBias},
+      ${funnel.fired}, ${funnel.watchCandidates}, ${funnel.durationMs}
+    )
+    ON CONFLICT (scanned_at) DO NOTHING
+    RETURNING scanned_at
+  ` as Array<{ scanned_at: number }>;
+  return rows.length > 0;
+}
+
+export async function insertSignalTraceSnapshot(
+  signal: Pick<SignalLog, "id" | "side" | "entry_price" | "best_tp" | "outcome">,
+  observedAt: number,
+  price: number,
+  detail?: string,
+): Promise<boolean> {
+  const sql = getDb();
+  if (!sql || signal.entry_price <= 0 || !Number.isFinite(price)) return false;
+  const rawPct = (price - signal.entry_price) / signal.entry_price * 100;
+  const movePct = signal.side === "long" ? rawPct : -rawPct;
+  const rows = await sql`
+    INSERT INTO signal_trace_snapshots
+      (signal_id, observed_at, price, move_pct, best_tp, outcome, detail)
+    VALUES (
+      ${signal.id}, ${observedAt}, ${price}, ${movePct},
+      ${signal.best_tp ?? null}, ${signal.outcome}, ${detail ?? null}
+    )
+    ON CONFLICT (signal_id, observed_at) DO UPDATE
+    SET price = EXCLUDED.price,
+        move_pct = EXCLUDED.move_pct,
+        best_tp = EXCLUDED.best_tp,
+        outcome = EXCLUDED.outcome,
+        detail = EXCLUDED.detail
+    RETURNING id
+  ` as Array<{ id: number }>;
+  return rows.length > 0;
+}
+
+export async function getSignalTraceSnapshots(signalIds: string[], limitPerSignal = 96): Promise<Record<string, SignalTraceSnapshot[]>> {
+  const sql = getDb();
+  if (!sql || signalIds.length === 0) return {};
+  const rows = await sql`
+    SELECT signal_id, observed_at, price, move_pct, best_tp, outcome, detail
+    FROM (
+      SELECT
+        signal_id,
+        observed_at,
+        price,
+        move_pct,
+        best_tp,
+        outcome,
+        detail,
+        ROW_NUMBER() OVER (PARTITION BY signal_id ORDER BY observed_at DESC) AS rn
+      FROM signal_trace_snapshots
+      WHERE signal_id = ANY(${signalIds})
+    ) ranked
+    WHERE rn <= ${limitPerSignal}
+    ORDER BY signal_id, observed_at ASC
+  ` as Array<Record<string, unknown>>;
+
+  const out: Record<string, SignalTraceSnapshot[]> = {};
+  for (const row of rows) {
+    const signalId = String(row.signal_id ?? "");
+    const item: SignalTraceSnapshot = {
+      signal_id: signalId,
+      observed_at: toNumber(row.observed_at),
+      price: toNumber(row.price),
+      move_pct: toNumber(row.move_pct),
+      best_tp: row.best_tp == null ? null : String(row.best_tp),
+      outcome: toOutcome(row.outcome),
+      detail: row.detail == null ? null : String(row.detail),
+    };
+    out[signalId] = [...(out[signalId] ?? []), item];
+  }
+  return out;
 }
 
 // Returns all signals that still need monitoring. Active signals are included

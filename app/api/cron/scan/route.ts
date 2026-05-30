@@ -15,9 +15,10 @@ import { detectRecentSignals, detectWatchCandidate } from "@/lib/signals";
 import { dailyVwap, weeklyVwap } from "@/lib/vwap";
 import { computeTargets } from "@/lib/targets";
 import { storeScanResult, loadLatestScan } from "@/lib/kv";
-import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, updateBestTP, expireOldSignals, pruneOldSignals, upsertRadarCandidates, markRadarFired, pruneStaleRadar } from "@/lib/db";
+import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, updateBestTP, expireOldSignals, pruneOldSignals, upsertRadarCandidates, markRadarFired, pruneStaleRadar, insertScanFunnel, insertSignalTraceSnapshot } from "@/lib/db";
 import type { RadarUpsert } from "@/lib/db";
 import { resolveOutcome } from "@/lib/outcomes";
+import { MODEL_PARAMS_HASH, MODEL_VERSION } from "@/lib/model";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
@@ -27,6 +28,15 @@ const CONCURRENCY   = parseInt(process.env.FETCH_CONCURRENCY ?? "20",  10);
 const RECENT_SIGNAL_BARS    = parseInt(process.env.RECENT_SIGNAL_BARS    ?? "8", 10);
 const RECENT_SIGNAL_BARS_1H = parseInt(process.env.RECENT_SIGNAL_BARS_1H ?? "4", 10);
 const WATCHLIST_LIMIT = parseInt(process.env.WATCHLIST_LIMIT ?? "30", 10);
+
+interface ScanLoopResult {
+  signals: Signal[];
+  watch: WatchCandidate | null;
+  entryCandidates15m: number;
+  entryCandidates1h: number;
+  passedZ: number;
+  passedBias: number;
+}
 
 function authorize(req: NextRequest): boolean {
   const expected = process.env.CRON_SECRET;
@@ -85,7 +95,14 @@ export async function GET(req: NextRequest) {
     const recentSignals = detectRecentSignals(symbol, "15m", entryKlines, RECENT_SIGNAL_BARS);
     const watchSeed = detectWatchCandidate(symbol, "15m", entryKlines);
     if (recentSignals.length === 0 && (!watchSeed || watchSeed.score < 5)) {
-      return { signals: [] as Signal[], watch: null as WatchCandidate | null };
+      return {
+        signals: [],
+        watch: null,
+        entryCandidates15m: recentSignals.length,
+        entryCandidates1h: 0,
+        passedZ: recentSignals.length,
+        passedBias: 0,
+      } satisfies ScanLoopResult;
     }
 
     const [oneHourKlines, fourHourKlines, oiHistory, lsData] = await Promise.all([
@@ -213,18 +230,33 @@ export async function GET(req: NextRequest) {
         })
       : null;
 
-    return { signals: enrichedSignals, watch };
+    return {
+      signals: enrichedSignals,
+      watch,
+      entryCandidates15m: recentSignals.length,
+      entryCandidates1h: recentSignals1h.length,
+      passedZ: allRecentSignals.length,
+      passedBias: enrichedSignals.length,
+    } satisfies ScanLoopResult;
   });
 
   // 5. Collect
   const signals: Signal[] = [];
   const watchlist: WatchCandidate[] = [];
   const errored: string[] = [];
+  let entryCandidates15m = 0;
+  let entryCandidates1h = 0;
+  let passedZ = 0;
+  let passedBias = 0;
   for (const r of results) {
     if ("error" in r) errored.push(r.item);
     else {
       signals.push(...r.result.signals);
       if (r.result.watch) watchlist.push(r.result.watch);
+      entryCandidates15m += r.result.entryCandidates15m;
+      entryCandidates1h += r.result.entryCandidates1h;
+      passedZ += r.result.passedZ;
+      passedBias += r.result.passedBias;
     }
   }
 
@@ -272,9 +304,25 @@ export async function GET(req: NextRequest) {
   let dbSignalsInserted = 0;
   let dbOutcomesResolved = 0;
   let dbSignalsPruned = 0;
+  let dbFunnelLogged = false;
+  let dbTraceSnapshotsInserted = 0;
   let dbError: string | undefined;
   try {
     await ensureSchema();
+
+    dbFunnelLogged = await insertScanFunnel({
+      scannedAt: scanResult.scannedAt,
+      regime,
+      symbolsScanned: symbols.length,
+      symbolsErrored: errored.length,
+      entryCandidates15m,
+      entryCandidates1h,
+      passedZ,
+      passedBias,
+      fired: signals.length,
+      watchCandidates: watchlist.length,
+      durationMs: scanResult.durationMs,
+    });
 
     // 7a-pre. Upsert this scan's radar candidates so their lifecycle is tracked
     //         across scans (when first seen, peak score, eventual firing).
@@ -331,15 +379,20 @@ export async function GET(req: NextRequest) {
           if (!klines) return;
           // Only consider bars that came after this signal's bar
           const afterSignal = klines.filter((k) => k.openTime > row.bar_time);
+          const latestClosed = afterSignal[afterSignal.length - 1] ?? klines[klines.length - 1];
+          if (latestClosed) {
+            const traced = await insertSignalTraceSnapshot(row, scanResult.scannedAt, latestClosed.close, "cron_cycle");
+            if (traced) dbTraceSnapshotsInserted++;
+          }
           const result = resolveOutcome(row, afterSignal);
           if (!result) return;
           if (result.terminal) {
             // SL hit or TP3 hit — finalize the outcome, stop re-checking
-            await updateOutcome(row.id, result.outcome, result.outcomeAt, result.outcomePrice, result.maxFavorable, result.maxAdverse);
+            await updateOutcome(row.id, result.outcome, result.outcomeAt, result.outcomePrice, result.maxFavorable, result.maxAdverse, result.outcomeDetail);
             dbOutcomesResolved++;
           } else {
             // TP1 or TP2 reached but still running — record progress, keep active
-            await updateBestTP(row.id, result.outcome);
+            await updateBestTP(row.id, result.outcome, result.outcomeAt, result.outcomePrice, result.maxFavorable, result.maxAdverse, result.outcomeDetail);
           }
         })
       );
@@ -363,7 +416,18 @@ export async function GET(req: NextRequest) {
     recentWindowBars: RECENT_SIGNAL_BARS,
     errors:         scanResult.symbolsErrored.length,
     regime:         scanResult.regime,
+    modelVersion:   MODEL_VERSION,
+    modelParamsHash: MODEL_PARAMS_HASH,
+    funnel: {
+      logged: dbFunnelLogged,
+      entryCandidates15m,
+      entryCandidates1h,
+      passedZ,
+      passedBias,
+      fired: signals.length,
+    },
     dbSignalsInserted,
+    dbTraceSnapshotsInserted,
     dbOutcomesResolved,
     dbSignalsPruned,
     ...(dbError ? { dbError } : {}),

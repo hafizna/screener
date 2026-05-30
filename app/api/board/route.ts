@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getTrackedSignals, getRadarCandidates, getRecentResolved } from "@/lib/db";
+import { getTrackedSignals, getRadarCandidates, getRecentResolved, getSignalTraceSnapshots } from "@/lib/db";
 import { fetchMarkPrices } from "@/lib/binance";
 
 export const dynamic = "force-dynamic";
@@ -16,14 +16,20 @@ export async function GET() {
       getRecentResolved(25),
       fetchMarkPrices().catch(() => new Map<string, number>()),
     ]);
+    const traces = await getSignalTraceSnapshots([
+      ...tracked.map((s) => s.id),
+      ...resolved.map((s) => s.id),
+    ]);
 
     const withPrice = <T extends { symbol: string }>(rows: T[]) =>
       rows.map((r) => ({ ...r, current_price: prices.get(r.symbol) ?? null }));
+    const withPriceAndTrace = <T extends { id: string; symbol: string }>(rows: T[]) =>
+      rows.map((r) => ({ ...r, current_price: prices.get(r.symbol) ?? null, trace: traces[r.id] ?? [] }));
 
     return NextResponse.json({
       radar: withPrice(radar),
-      tracked: withPrice(tracked),
-      resolved: withPrice(resolved),
+      tracked: withPriceAndTrace(tracked),
+      resolved: withPriceAndTrace(resolved),
     });
   } catch (e) {
     return NextResponse.json({ error: (e as Error).message }, { status: 500 });

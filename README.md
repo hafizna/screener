@@ -59,12 +59,13 @@ UPSTASH_REDIS_REST_URL=https://...upstash.io
 UPSTASH_REDIS_REST_TOKEN=...
 DATABASE_URL=postgresql://...
 CRON_SECRET=<openssl rand -hex 32>
-SIGNAL_RETENTION_DAYS=14
+MODEL_VERSION=v1
 RECENT_SIGNAL_BARS=8
 WATCHLIST_LIMIT=30
 ```
 
-`SIGNAL_RETENTION_DAYS` is optional. The cron deletes old `signal_log` rows after this many days so Neon storage stays bounded.
+`MODEL_VERSION` is optional and defaults to `v1`; set it before changing any signal rules so performance can be segmented by model generation.
+Signal history is permanent by default. To restore old destructive pruning, set `SIGNAL_PRUNE_ENABLED=true` and `SIGNAL_RETENTION_DAYS=<days>`.
 `RECENT_SIGNAL_BARS` controls how many recently closed 15m candles are replayed each scan, so a valid entry trigger can still be captured if one cron tick missed it. `WATCHLIST_LIMIT` caps the Radar candidate table.
 
 ### 4. Cron
@@ -111,7 +112,7 @@ Binance fapi  →  Vercel cron (every 15m)  →  Upstash Redis  →  Next.js das
 
 The cron endpoint fans out fetches with concurrency 20, runs signal detection in-process, and writes a single `mpz:scan:latest` key to Redis. The dashboard polls `/api/signals` every 60s and reads that key.
 
-Signal history and outcomes are stored in Neon Postgres and pruned automatically after `SIGNAL_RETENTION_DAYS`.
+Signal history and outcomes are stored in Neon Postgres as the system of record. Each saved signal includes model metadata plus the feature snapshot available at signal birth, outcome changes are also written to `signal_outcome_events`, each cron writes per-signal progress to `signal_trace_snapshots`, and aggregate funnel counts go to `scan_funnel_log`.
 
 ## Honest expectations
 

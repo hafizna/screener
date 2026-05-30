@@ -18,6 +18,9 @@ export async function POST(req: NextRequest) {
 
   await ensureSchema();
   const sql = neon(url);
+  await sql`DELETE FROM scan_funnel_log`;
+  await sql`DELETE FROM signal_outcome_events`;
+  await sql`DELETE FROM signal_trace_snapshots`;
   const rows = await sql`DELETE FROM signal_log RETURNING id` as Array<{ id: string }>;
 
   return NextResponse.json({ deleted: rows.length, ok: true });

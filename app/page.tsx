@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { MarketRegime, ScanResult, Signal, SignalType, Timeframe } from "@/lib/types";
-import type { HistoryResult, SignalLog, RadarLog, Outcome } from "@/lib/db";
+import type { HistoryResult, SignalLog, RadarLog, Outcome, SignalTraceSnapshot } from "@/lib/db";
 
 type ApiResponse = (ScanResult & { stale: boolean; ageMs: number }) | {
   scannedAt: null;
@@ -25,7 +25,7 @@ interface EntryViability {
 
 
 type BoardRadar = RadarLog & { current_price: number | null };
-type BoardTrade = SignalLog & { current_price: number | null };
+type BoardTrade = SignalLog & { current_price: number | null; trace?: SignalTraceSnapshot[] };
 interface BoardData { radar: BoardRadar[]; tracked: BoardTrade[]; resolved: BoardTrade[] }
 
 export default function DashboardPage() {
@@ -263,6 +263,7 @@ function LifecycleBoard({
   onPaperTrade: (id: string, entryPrice: number) => void;
 }) {
   const sideOk = (s: "long" | "short") => sideFilter === "all" || s === sideFilter;
+  const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
 
   const radar = (board?.radar ?? []).filter((r) => sideOk(r.side));
   const tracked = (board?.tracked ?? []).filter((t) => sideOk(t.side));
@@ -275,9 +276,27 @@ function LifecycleBoard({
   const resolvedFromTracked = tracked.filter((t) => t.outcome !== "active");
   const resolvedIds = new Set(resolvedFromTracked.map((r) => r.id));
   const resolved = [...resolvedFromTracked, ...resolvedAll.filter((r) => !resolvedIds.has(r.id))];
+  const traceable = [...running, ...fired, ...tracked.filter((t) => t.outcome !== "active")];
+  const selectedTrace =
+    traceable.find((t) => t.id === selectedTraceId) ??
+    running[0] ??
+    fired[0] ??
+    traceable[0] ??
+    null;
 
   // Fired sorted: near-entry (most actionable) first.
   const firedSorted = [...fired].sort((a, b) => entryDistancePct(a) - entryDistancePct(b));
+
+  useEffect(() => {
+    if (!board) return;
+    if (traceable.length === 0) {
+      if (selectedTraceId !== null) setSelectedTraceId(null);
+      return;
+    }
+    if (!selectedTraceId || !traceable.some((t) => t.id === selectedTraceId)) {
+      setSelectedTraceId(traceable[0].id);
+    }
+  }, [board, selectedTraceId, traceable]);
 
   if (loading && !board) {
     return <div className="text-neutral-500 text-sm py-12 text-center">Loading board…</div>;
@@ -292,7 +311,7 @@ function LifecycleBoard({
           ))}
         </FilterGroup>
         <span className="ml-auto text-xs text-neutral-600">
-          radar→fired→running→resolved · auto-refresh 60s
+          radar→fired→running→trace · resolved lives in History · auto-refresh 60s
         </span>
       </section>
 
@@ -310,6 +329,7 @@ function LifecycleBoard({
             ? <BoardEmpty text="Nothing freshly fired." />
             : firedSorted.map((t) => (
                 <TradeCard key={t.id} row={t} stage="fired"
+                  onSelectTrace={setSelectedTraceId}
                   watched={watched} onWatch={onWatch} papered={papered} onPaperTrade={onPaperTrade} />
               ))}
         </BoardColumn>
@@ -320,20 +340,107 @@ function LifecycleBoard({
             ? <BoardEmpty text="No runners right now." />
             : running.map((t) => (
                 <TradeCard key={t.id} row={t} stage="running"
+                  onSelectTrace={setSelectedTraceId}
                   watched={watched} onWatch={onWatch} papered={papered} onPaperTrade={onPaperTrade} />
               ))}
         </BoardColumn>
 
-        <BoardColumn stage="resolved" title="Resolved" count={resolved.length} accent="text-neutral-400"
-          hint="Recently closed: TP / SL / expired. Full stats in History." defaultCollapsed={true}>
-          {resolved.length === 0
-            ? <BoardEmpty text="No resolved trades yet." />
-            : resolved.map((t) => (
-                <TradeCard key={t.id} row={t} stage="resolved"
-                  watched={watched} onWatch={onWatch} papered={papered} onPaperTrade={onPaperTrade} />
-              ))}
+        <BoardColumn stage="resolved" title="Trace" count={traceable.length} accent="text-cyan-300"
+          hint="Selected ticker progress from entry across cron cycles. Resolved rows are in History.">
+          <SignalTracePanel row={selectedTrace} resolvedCount={resolved.length} />
         </BoardColumn>
       </div>
+    </div>
+  );
+}
+
+function currentMovePct(row: Pick<SignalLog, "side" | "entry_price">, currentPrice?: number | null): number | null {
+  if (currentPrice == null || row.entry_price <= 0) return null;
+  const raw = (currentPrice - row.entry_price) / row.entry_price * 100;
+  return row.side === "long" ? raw : -raw;
+}
+
+function formatSignedPct(value: number): string {
+  return `${value >= 0 ? "+" : ""}${value.toFixed(2)}%`;
+}
+
+function SignalTracePanel({ row, resolvedCount }: { row: BoardTrade | null; resolvedCount: number }) {
+  if (!row) {
+    return <BoardEmpty text={resolvedCount > 0 ? "No live ticker selected. Resolved signals are in History." : "No traceable ticker yet."} />;
+  }
+  const trace = row.trace ?? [];
+  const currentPct = currentMovePct(row, row.current_price);
+  const lastTrace = trace[trace.length - 1];
+  const best = trace.length ? Math.max(...trace.map((t) => t.move_pct)) : null;
+  const worst = trace.length ? Math.min(...trace.map((t) => t.move_pct)) : null;
+  const latestPct = currentPct ?? lastTrace?.move_pct ?? null;
+  const progressWidth = latestPct === null ? 50 : Math.max(0, Math.min(100, 50 + latestPct * 10));
+
+  return (
+    <div className="space-y-3">
+      <CardShell className="border-cyan-900/40 bg-cyan-950/10">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-[10px] text-neutral-500">selected ticker</div>
+            <div className="mt-0.5 flex items-center gap-2">
+              <span className="font-medium text-sm">{row.symbol}</span>
+              <SideTag side={row.side} />
+              <TradeLifecycleBadge signal={row} currentPrice={row.current_price} />
+            </div>
+          </div>
+          {latestPct !== null && (
+            <span className={`text-sm tabular-nums ${latestPct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {formatSignedPct(latestPct)}
+            </span>
+          )}
+        </div>
+
+        <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+          <TraceMetric label="Entry" value={formatPrice(row.entry_price)} />
+          <TraceMetric label="Now" value={row.current_price != null ? formatPrice(row.current_price) : "—"} />
+          <TraceMetric label="Best" value={best !== null ? formatSignedPct(best) : "—"} tone="good" />
+          <TraceMetric label="Worst" value={worst !== null ? formatSignedPct(worst) : "—"} tone="bad" />
+        </div>
+
+        <div className="mt-3 h-2 rounded bg-neutral-800 overflow-hidden" title="Center is entry; right is gain, left is loss. Scale is capped for readability.">
+          <div className="relative h-full">
+            <div className="absolute left-1/2 top-0 h-full w-px bg-neutral-500" />
+            <div
+              className={`absolute top-0 h-full ${latestPct !== null && latestPct >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
+              style={{
+                left: latestPct !== null && latestPct >= 0 ? "50%" : `${progressWidth}%`,
+                width: latestPct !== null ? `${Math.abs(progressWidth - 50)}%` : "0%",
+              }}
+            />
+          </div>
+        </div>
+      </CardShell>
+
+      {trace.length === 0 ? (
+        <BoardEmpty text="No cron-cycle trace snapshots yet. The next scan will start filling this." />
+      ) : trace.slice(-8).map((point) => (
+        <CardShell key={`${point.signal_id}-${point.observed_at}`}>
+          <div className="flex items-center justify-between">
+            <span className="text-neutral-500 tabular-nums">{formatWib(point.observed_at)}</span>
+            <span className={`tabular-nums ${point.move_pct >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+              {formatSignedPct(point.move_pct)}
+            </span>
+          </div>
+          <div className="mt-0.5 text-[10px] text-neutral-600 tabular-nums">{formatPrice(point.price)}</div>
+        </CardShell>
+      ))}
+
+      {resolvedCount > 0 && <div className="text-[10px] text-neutral-600 text-center">{resolvedCount} resolved row(s) moved to History.</div>}
+    </div>
+  );
+}
+
+function TraceMetric({ label, value, tone }: { label: string; value: string; tone?: "good" | "bad" }) {
+  const cls = tone === "good" ? "text-emerald-400" : tone === "bad" ? "text-red-400" : "text-neutral-300";
+  return (
+    <div>
+      <div className="text-neutral-500">{label}</div>
+      <div className={`mt-0.5 tabular-nums ${cls}`}>{value}</div>
     </div>
   );
 }
@@ -418,10 +525,11 @@ function RadarCard({ row }: { row: BoardRadar }) {
   );
 }
 
-function TradeCard({ row, stage, watched, onWatch, papered, onPaperTrade }: {
+function TradeCard({ row, stage, watched, onWatch, papered, onPaperTrade, onSelectTrace }: {
   row: BoardTrade; stage: BoardStage;
   watched: Set<string>; onWatch: (id: string, holdDays: number) => void;
   papered: Set<string>; onPaperTrade: (id: string, entryPrice: number) => void;
+  onSelectTrace?: (id: string) => void;
 }) {
   const v = stage === "fired" ? boardViability(row) : null;
   const isResolved = row.outcome !== "active";
@@ -491,6 +599,9 @@ function TradeCard({ row, stage, watched, onWatch, papered, onPaperTrade }: {
         <a href={binanceFuturesUrl(row.symbol)} target="_blank" rel="noopener noreferrer" className="text-amber-400 hover:text-amber-300">BN</a>
         {(stage === "fired" || stage === "running") && !isPapered && (
           <PaperTradeQuickButton row={row} onPaperTrade={onPaperTrade} />
+        )}
+        {onSelectTrace && (
+          <button onClick={() => onSelectTrace(row.id)} className="text-neutral-600 hover:text-cyan-300" title="Trace this ticker">trace</button>
         )}
         {(stage === "fired" || stage === "running") && !row.watched && !watched.has(row.id) && (
           <button onClick={() => onWatch(row.id, 3)} className="ml-auto text-neutral-600 hover:text-amber-300" title="Star (keep tracking)">☆</button>

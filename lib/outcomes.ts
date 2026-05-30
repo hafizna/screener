@@ -7,6 +7,7 @@ export interface OutcomeResult {
   outcomePrice: number;
   maxFavorable: number;
   maxAdverse:   number;
+  outcomeDetail: string;
   // true = trailing SL hit or TP3 hit — outcome final, signal closes to History.
   // false = TP1/TP2 reached but price still inside trailing range — keep active.
   terminal: boolean;
@@ -52,7 +53,7 @@ export function resolveOutcome(
     const tp1Hit = tp1 != null && (isLong ? bar.high >= tp1 : bar.low  <= tp1);
 
     if (tp3Hit) {
-      return { outcome: "tp3", outcomeAt: bar.closeTime, outcomePrice: tp3!, maxFavorable: maxFav, maxAdverse: maxAdv, terminal: true };
+      return { outcome: "tp3", outcomeAt: bar.closeTime, outcomePrice: tp3!, maxFavorable: maxFav, maxAdverse: maxAdv, outcomeDetail: "tp3_hit", terminal: true };
     }
     if (tp2Hit && (!bestTP || bestTP.outcome === "tp1")) {
       bestTP = { outcome: "tp2", at: bar.closeTime, price: tp2! };
@@ -63,10 +64,10 @@ export function resolveOutcome(
 
     if (slHit) {
       if (!bestTP) {
-        return { outcome: "sl", outcomeAt: bar.closeTime, outcomePrice: sl!, maxFavorable: maxFav, maxAdverse: maxAdv, terminal: true };
+        return { outcome: "sl", outcomeAt: bar.closeTime, outcomePrice: sl!, maxFavorable: maxFav, maxAdverse: maxAdv, outcomeDetail: "initial_sl_hit", terminal: true };
       }
       // Trailing SL hit after a TP — lock in the best TP reached so far.
-      return { outcome: bestTP.outcome, outcomeAt: bar.closeTime, outcomePrice: effectiveSL!, maxFavorable: maxFav, maxAdverse: maxAdv, terminal: true };
+      return { outcome: bestTP.outcome, outcomeAt: bar.closeTime, outcomePrice: effectiveSL!, maxFavorable: maxFav, maxAdverse: maxAdv, outcomeDetail: `trailing_sl_after_${bestTP.outcome}`, terminal: true };
     }
 
     // Tighten trailing SL AFTER this bar's hits — takes effect from next bar.
@@ -77,7 +78,7 @@ export function resolveOutcome(
   // Klines exhausted — if any TP was reached, return it as non-terminal (still running).
   // Caller should NOT finalize the outcome; update best_tp only and re-check next scan.
   if (bestTP) {
-    return { outcome: bestTP.outcome, outcomeAt: bestTP.at, outcomePrice: bestTP.price, maxFavorable: maxFav, maxAdverse: maxAdv, terminal: false };
+    return { outcome: bestTP.outcome, outcomeAt: bestTP.at, outcomePrice: bestTP.price, maxFavorable: maxFav, maxAdverse: maxAdv, outcomeDetail: `${bestTP.outcome}_hit_running`, terminal: false };
   }
 
   return null; // No level hit yet — signal still active
