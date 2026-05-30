@@ -723,7 +723,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
         <HistoryBreakdown title="Regime" rows={regimeRows} />
       </div>
 
-      <CrossTab signals={signals} />
+      <CrossTab signals={confidenceSignals} />
 
       {filteredSignals.length === 0 ? (
         <div className="rounded-md border border-neutral-800 bg-neutral-900/40 p-8 text-center text-neutral-500 text-sm">
@@ -955,16 +955,40 @@ function orderedBuckets(rows: SignalLog[], dim: CrossTabDim): string[] {
   return [...ordered, ...extras];
 }
 
+// Insufficient-sample threshold: below this we hide the win rate to avoid misleading reads.
+const CROSS_TAB_MIN_N = 5;
+
+function cellAvgMfe(c: CrossCell): number | null { return c.mfeN ? c.mfeSum / c.mfeN : null; }
+function cellAvgMae(c: CrossCell): number | null { return c.maeN ? c.maeSum / c.maeN : null; }
+
+function cellBgStyle(c: CrossCell): React.CSSProperties | undefined {
+  const wr = cellWinRate(c);
+  if (cellN(c) < CROSS_TAB_MIN_N || wr === null) return undefined;
+  if (wr >= 55) return { backgroundColor: "rgba(34, 197, 94, 0.15)" };  // green
+  if (wr <= 35) return { backgroundColor: "rgba(239, 68, 68, 0.15)" };  // red
+  return undefined;
+}
+
+function cellTooltip(c: CrossCell): string | undefined {
+  const n = cellN(c);
+  if (n === 0) return undefined;
+  const wr = cellWinRate(c);
+  const mfe = cellAvgMfe(c);
+  const mae = cellAvgMae(c);
+  return `N=${n} | Win ${wr}% | Avg MFE ${mfe !== null ? mfe.toFixed(2) : "—"}% | Avg MAE ${mae !== null ? mae.toFixed(2) : "—"}%`;
+}
+
 function CrossTab({ signals }: { signals: SignalLog[] }) {
   const [rowDim, setRowDim] = useState<CrossTabDimKey>("regime");
   const [colDim, setColDim] = useState<CrossTabDimKey>("side");
+  const [selected, setSelected] = useState<{ rb: string; cb: string } | null>(null);
 
   // Row and column cannot be the same dimension.
   function nextOtherDim(exclude: CrossTabDimKey): CrossTabDimKey {
     return CROSS_TAB_DIM_ORDER.find((d) => d !== exclude) ?? "side";
   }
-  function onRowChange(v: CrossTabDimKey) { setRowDim(v); if (v === colDim) setColDim(nextOtherDim(v)); }
-  function onColChange(v: CrossTabDimKey) { setColDim(v === rowDim ? nextOtherDim(v) : v); }
+  function onRowChange(v: CrossTabDimKey) { setSelected(null); setRowDim(v); if (v === colDim) setColDim(nextOtherDim(v)); }
+  function onColChange(v: CrossTabDimKey) { setSelected(null); setColDim(v === rowDim ? nextOtherDim(v) : v); }
 
   const pivot = useMemo(() => {
     const rDim = CROSS_TAB_DIMS[rowDim];
@@ -991,6 +1015,18 @@ function CrossTab({ signals }: { signals: SignalLog[] }) {
     return { rowBuckets, colBuckets, cells, rowTotals, colTotals, grand };
   }, [signals, rowDim, colDim]);
 
+  // Resolved (win/loss) trades behind the clicked intersection cell, for the modal.
+  const selectedTrades = useMemo(() => {
+    if (!selected) return [];
+    const rDim = CROSS_TAB_DIMS[rowDim];
+    const cDim = CROSS_TAB_DIMS[colDim];
+    return signals.filter((row) =>
+      rDim.bucketFor(row) === selected.rb &&
+      cDim.bucketFor(row) === selected.cb &&
+      (row.outcome === "tp1" || row.outcome === "tp2" || row.outcome === "tp3" || row.outcome === "sl")
+    );
+  }, [selected, signals, rowDim, colDim]);
+
   const dimSelect = (value: CrossTabDimKey, onChange: (v: CrossTabDimKey) => void) => (
     <select
       value={value}
@@ -1008,7 +1044,7 @@ function CrossTab({ signals }: { signals: SignalLog[] }) {
   const renderCell = (c: CrossCell) => {
     const n = cellN(c);
     const wr = cellWinRate(c);
-    if (n === 0 || wr === null) return <span className="text-neutral-600">—</span>;
+    if (n < CROSS_TAB_MIN_N || wr === null) return <span className="text-neutral-600">—</span>;
     return (
       <div className="leading-tight">
         <div className="text-neutral-400 text-xs">N={n}</div>
@@ -1016,6 +1052,8 @@ function CrossTab({ signals }: { signals: SignalLog[] }) {
       </div>
     );
   };
+
+  const hasData = pivot.rowBuckets.length > 0 && pivot.colBuckets.length > 0 && cellN(pivot.grand) > 0;
 
   return (
     <div className="mb-4 rounded-md border border-neutral-800 bg-neutral-900/30 overflow-hidden">
@@ -1030,38 +1068,118 @@ function CrossTab({ signals }: { signals: SignalLog[] }) {
           Column dimension {dimSelect(colDim, onColChange)}
         </label>
       </div>
-      <div className="overflow-x-auto">
-        <table className="text-sm">
-          <thead className="text-neutral-500 text-left">
-            <tr className="border-t border-neutral-800">
-              <th className="px-3 py-2 font-normal sticky left-0 bg-neutral-900/60">
-                {CROSS_TAB_DIMS[rowDim].label} \ {CROSS_TAB_DIMS[colDim].label}
-              </th>
-              {pivot.colBuckets.map((cb) => (
-                <th key={cb} className="px-3 py-2 font-normal text-center whitespace-nowrap">{cb}</th>
-              ))}
-              <th className="px-3 py-2 font-medium text-center text-neutral-300 whitespace-nowrap">Total</th>
-            </tr>
-          </thead>
-          <tbody>
-            {pivot.rowBuckets.map((rb) => (
-              <tr key={rb} className="border-t border-neutral-800">
-                <td className="px-3 py-2 text-neutral-300 whitespace-nowrap sticky left-0 bg-neutral-900/60">{rb}</td>
+      {!hasData ? (
+        <div className="px-3 pb-6 pt-2 text-center text-neutral-500 text-sm">
+          No data available for selected dimensions
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="text-sm">
+            <thead className="text-neutral-500 text-left">
+              <tr className="border-t border-neutral-800">
+                <th className="px-3 py-2 font-normal sticky left-0 bg-neutral-900/60">
+                  {CROSS_TAB_DIMS[rowDim].label} \ {CROSS_TAB_DIMS[colDim].label}
+                </th>
                 {pivot.colBuckets.map((cb) => (
-                  <td key={cb} className="px-3 py-2 text-center">{renderCell(cellOf(rb, cb))}</td>
+                  <th key={cb} className="px-3 py-2 font-normal text-center whitespace-nowrap">{cb}</th>
                 ))}
-                <td className="px-3 py-2 text-center bg-neutral-900/40">{renderCell(pivot.rowTotals.get(rb)!)}</td>
+                <th className="px-3 py-2 font-medium text-center text-neutral-300 whitespace-nowrap">Total</th>
               </tr>
-            ))}
-            <tr className="border-t border-neutral-700 bg-neutral-900/40">
-              <td className="px-3 py-2 font-medium text-neutral-300 sticky left-0 bg-neutral-900/60">Total</td>
-              {pivot.colBuckets.map((cb) => (
-                <td key={cb} className="px-3 py-2 text-center">{renderCell(pivot.colTotals.get(cb)!)}</td>
+            </thead>
+            <tbody>
+              {pivot.rowBuckets.map((rb) => (
+                <tr key={rb} className="border-t border-neutral-800">
+                  <td className="px-3 py-2 text-neutral-300 whitespace-nowrap sticky left-0 bg-neutral-900/60">{rb}</td>
+                  {pivot.colBuckets.map((cb) => {
+                    const c = cellOf(rb, cb);
+                    const clickable = cellN(c) > 0;
+                    return (
+                      <td
+                        key={cb}
+                        className={`px-3 py-2 text-center ${clickable ? "cursor-pointer hover:brightness-125" : ""}`}
+                        style={cellBgStyle(c)}
+                        title={cellTooltip(c)}
+                        onClick={clickable ? () => setSelected({ rb, cb }) : undefined}
+                      >
+                        {renderCell(c)}
+                      </td>
+                    );
+                  })}
+                  <td className="px-3 py-2 text-center bg-neutral-900/40" style={cellBgStyle(pivot.rowTotals.get(rb)!)} title={cellTooltip(pivot.rowTotals.get(rb)!)}>
+                    {renderCell(pivot.rowTotals.get(rb)!)}
+                  </td>
+                </tr>
               ))}
-              <td className="px-3 py-2 text-center font-medium">{renderCell(pivot.grand)}</td>
-            </tr>
-          </tbody>
-        </table>
+              <tr className="border-t border-neutral-700 bg-neutral-900/40">
+                <td className="px-3 py-2 font-medium text-neutral-300 sticky left-0 bg-neutral-900/60">Total</td>
+                {pivot.colBuckets.map((cb) => (
+                  <td key={cb} className="px-3 py-2 text-center" style={cellBgStyle(pivot.colTotals.get(cb)!)} title={cellTooltip(pivot.colTotals.get(cb)!)}>
+                    {renderCell(pivot.colTotals.get(cb)!)}
+                  </td>
+                ))}
+                <td className="px-3 py-2 text-center font-medium" style={cellBgStyle(pivot.grand)} title={cellTooltip(pivot.grand)}>
+                  {renderCell(pivot.grand)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+      {selected && (
+        <CrossTabCellModal
+          title={`${CROSS_TAB_DIMS[rowDim].label}: ${selected.rb} × ${CROSS_TAB_DIMS[colDim].label}: ${selected.cb}`}
+          trades={selectedTrades}
+          onClose={() => setSelected(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+function CrossTabCellModal({ title, trades, onClose }: { title: string; trades: SignalLog[]; onClose: () => void }) {
+  const wins = trades.filter((t) => t.outcome === "tp1" || t.outcome === "tp2" || t.outcome === "tp3").length;
+  const losses = trades.filter((t) => t.outcome === "sl").length;
+  const wr = wins + losses ? Math.round(wins / (wins + losses) * 100) : null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3" onClick={onClose}>
+      <div className="w-full max-w-2xl max-h-[80vh] overflow-hidden rounded-lg border border-neutral-700 bg-neutral-950 flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-4 py-3">
+          <div>
+            <div className="text-sm font-medium text-neutral-200">{title}</div>
+            <div className="text-xs text-neutral-500">N={wins + losses} · Win {wr !== null ? `${wr}%` : "—"} · {wins}W / {losses}L</div>
+          </div>
+          <button onClick={onClose} className="px-2 py-1 text-sm rounded-md border border-neutral-700 hover:border-neutral-500 text-neutral-400 hover:text-neutral-200">✕</button>
+        </div>
+        <div className="overflow-auto">
+          <table className="w-full text-xs">
+            <thead className="bg-neutral-900 text-neutral-500 text-left sticky top-0">
+              <tr>
+                <th className="px-3 py-2 font-normal">Time (WIB)</th>
+                <th className="px-3 py-2 font-normal">Symbol</th>
+                <th className="px-3 py-2 font-normal">Side</th>
+                <th className="px-3 py-2 font-normal">Outcome</th>
+                <th className="px-3 py-2 font-normal text-right">MFE</th>
+                <th className="px-3 py-2 font-normal text-right">MAE</th>
+              </tr>
+            </thead>
+            <tbody>
+              {trades.map((row) => {
+                const mfe = row.max_favorable && row.entry_price ? Math.abs(row.max_favorable) / row.entry_price * 100 : null;
+                const mae = row.max_adverse && row.entry_price ? Math.abs(row.max_adverse) / row.entry_price * 100 : null;
+                return (
+                  <tr key={row.id} className="border-t border-neutral-800">
+                    <td className="px-3 py-2 text-neutral-500 tabular-nums whitespace-nowrap">{formatWib(row.bar_time)}</td>
+                    <td className="px-3 py-2 font-medium">{row.symbol}</td>
+                    <td className={`px-3 py-2 ${row.side === "long" ? "text-emerald-400" : "text-pink-400"}`}>{row.side}</td>
+                    <td className="px-3 py-2"><OutcomeBadge outcome={row.outcome} /></td>
+                    <td className="px-3 py-2 text-right tabular-nums text-emerald-400">{mfe !== null ? `+${mfe.toFixed(2)}%` : "—"}</td>
+                    <td className="px-3 py-2 text-right tabular-nums text-red-400">{mae !== null ? `−${mae.toFixed(2)}%` : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );
