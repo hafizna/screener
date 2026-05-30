@@ -1109,7 +1109,7 @@ function historyTpMagnetBucket(row: SignalLog): string {
 // ─── Cross-tab analysis ───────────────────────────────────────────────────────
 // Pivot any two breakdown dimensions against each other. Bucket functions are
 // reused from the breakdown cards so a signal lands in the same bucket here.
-type CrossTabDimKey = "confidence" | "sqz" | "profile" | "tpMagnet" | "timeOfDay" | "side" | "regime";
+type CrossTabDimKey = "confidence" | "sqz" | "profile" | "tpMagnet" | "timeOfDay" | "side" | "regime" | "signalType" | "bias1h" | "bias4h" | "frBias" | "oiBias" | "lsBias" | "rsBias" | "deltaBias";
 
 interface CrossTabDim {
   label: string;
@@ -1118,7 +1118,7 @@ interface CrossTabDim {
 }
 
 // Dropdown order (and labels) per spec.
-const CROSS_TAB_DIM_ORDER: CrossTabDimKey[] = ["confidence", "sqz", "profile", "tpMagnet", "timeOfDay", "side", "regime"];
+const CROSS_TAB_DIM_ORDER: CrossTabDimKey[] = ["confidence", "sqz", "profile", "tpMagnet", "timeOfDay", "side", "regime", "signalType", "bias1h", "bias4h", "frBias", "oiBias", "lsBias", "rsBias", "deltaBias"];
 
 const CROSS_TAB_DIMS: Record<CrossTabDimKey, CrossTabDim> = {
   confidence: { label: "Confidence", bucketFor: historyConfidenceBucket, order: ["high", "medium", "low"] },
@@ -1130,6 +1130,15 @@ const CROSS_TAB_DIMS: Record<CrossTabDimKey, CrossTabDim> = {
   side:       { label: "Side", bucketFor: (row) => row.side, order: ["long", "short"] },
   // Real regime values: neutral, flush, breakout (no "trend").
   regime:     { label: "Regime", bucketFor: (row) => row.regime ?? "unknown", order: ["neutral", "flush", "breakout"] },
+  // ── Phase-1 feature dimensions (snapshotted at signal time). Exact DB literals. ──
+  signalType: { label: "Type", bucketFor: (row) => row.signal_type ?? "unknown", order: ["bounce", "continuation", "standard"] },
+  bias1h:     { label: "Bias 1H", bucketFor: (row) => row.bias_1h ?? "unknown", order: ["long", "neutral", "short"] },
+  bias4h:     { label: "Bias 4H", bucketFor: (row) => row.bias_4h ?? "unknown", order: ["long", "neutral", "short"] },
+  frBias:     { label: "Funding", bucketFor: (row) => row.fr_bias ?? "unknown", order: ["favorable", "neutral", "unfavorable"] },
+  oiBias:     { label: "OI", bucketFor: (row) => row.oi_bias ?? "unknown", order: ["rising", "flat", "falling"] },
+  lsBias:     { label: "L/S ratio", bucketFor: (row) => row.ls_bias ?? "unknown", order: ["crowded_shorts", "balanced", "crowded_longs"] },
+  rsBias:     { label: "Rel. strength", bucketFor: (row) => row.rs_bias ?? "unknown", order: ["strong", "neutral", "weak"] },
+  deltaBias:  { label: "Taker delta", bucketFor: (row) => row.delta_bias ?? "unknown", order: ["aligned", "neutral", "opposed"] },
 };
 
 // Win = TP1/TP2/TP3, Loss = SL, Expired = timed out. Win rate = wins / (wins+losses+expired),
