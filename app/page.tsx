@@ -277,8 +277,12 @@ function LifecycleBoard({
   const resolvedIds = new Set(resolvedFromTracked.map((r) => r.id));
   const resolved = [...resolvedFromTracked, ...resolvedAll.filter((r) => !resolvedIds.has(r.id))];
   const traceable = [...running, ...fired, ...tracked.filter((t) => t.outcome !== "active")];
+  // A starred ticker is the one the user picked to follow — it drives the trace panel
+  // by default, ahead of whatever happens to be the newest runner.
+  const isStarred = (t: BoardTrade) => t.watched || watched.has(t.id);
   const selectedTrace =
     traceable.find((t) => t.id === selectedTraceId) ??
+    traceable.find(isStarred) ??
     running[0] ??
     fired[0] ??
     traceable[0] ??
@@ -294,9 +298,10 @@ function LifecycleBoard({
       return;
     }
     if (!selectedTraceId || !traceable.some((t) => t.id === selectedTraceId)) {
-      setSelectedTraceId(traceable[0].id);
+      const preferred = traceable.find(isStarred) ?? traceable[0];
+      setSelectedTraceId(preferred.id);
     }
-  }, [board, selectedTraceId, traceable]);
+  }, [board, selectedTraceId, traceable, watched]);
 
   if (loading && !board) {
     return <div className="text-neutral-500 text-sm py-12 text-center">Loading board…</div>;
@@ -604,7 +609,7 @@ function TradeCard({ row, stage, watched, onWatch, papered, onPaperTrade, onSele
           <button onClick={() => onSelectTrace(row.id)} className="text-neutral-600 hover:text-cyan-300" title="Trace this ticker">trace</button>
         )}
         {(stage === "fired" || stage === "running") && !row.watched && !watched.has(row.id) && (
-          <button onClick={() => onWatch(row.id, 3)} className="ml-auto text-neutral-600 hover:text-amber-300" title="Star (keep tracking)">☆</button>
+          <button onClick={() => { onWatch(row.id, 3); onSelectTrace?.(row.id); }} className="ml-auto text-neutral-600 hover:text-amber-300" title="Star & trace this ticker">☆</button>
         )}
       </div>
     </CardShell>
