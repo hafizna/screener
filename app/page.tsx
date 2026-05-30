@@ -276,7 +276,9 @@ function LifecycleBoard({
   const resolvedFromTracked = tracked.filter((t) => t.outcome !== "active");
   const resolvedIds = new Set(resolvedFromTracked.map((r) => r.id));
   const resolved = [...resolvedFromTracked, ...resolvedAll.filter((r) => !resolvedIds.has(r.id))];
-  const traceable = [...running, ...fired, ...tracked.filter((t) => t.outcome !== "active")];
+  // Only live signals are traceable. Once a signal hits SL / TP3 / expires (outcome
+  // != active), the trade plan is done — it drops off the board and lives in History.
+  const traceable = [...running, ...fired];
   // A starred ticker is the one the user picked to follow — it drives the trace panel
   // by default, ahead of whatever happens to be the newest runner.
   const isStarred = (t: BoardTrade) => t.watched || watched.has(t.id);
