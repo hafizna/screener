@@ -812,6 +812,9 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
   const sideRows      = historyPerformanceRows(confidenceSignals, (row) => row.side);
   const regimeRows    = historyPerformanceRows(confidenceSignals, (row) => row.regime ?? "unknown");
 
+  const RENDER_CAP = 500;
+  const visibleSignals = filteredSignals.slice(0, RENDER_CAP);
+
   return (
     <div>
       {/* Stats bar */}
@@ -844,6 +847,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
         </FilterGroup>
         <div className="ml-auto text-sm text-neutral-400">
           {filteredSignals.length} row{filteredSignals.length === 1 ? "" : "s"}
+          {filteredSignals.length > RENDER_CAP && ` (showing latest ${RENDER_CAP})`}
         </div>
       </section>
 
@@ -858,6 +862,8 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
       </div>
 
       <SelectionEdgePanel signals={signals} />
+
+      <PerformanceOverTime signals={confidenceSignals} />
 
       <CrossTab signals={confidenceSignals} />
 
@@ -889,7 +895,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
                 </tr>
               </thead>
               <tbody>
-                {filteredSignals.map((row) => {
+                {visibleSignals.map((row) => {
                   const isRunning = row.outcome === "active";
                   const durationMs = row.outcome_at
                     ? row.outcome_at - row.bar_time
@@ -1181,6 +1187,71 @@ function cellTooltip(c: CrossCell): string | undefined {
   const mfe = cellAvgMfe(c);
   const mae = cellAvgMae(c);
   return `N=${n} | Win ${wr}% | ${c.wins}W ${c.losses}L ${c.expired}Exp | Avg MFE ${mfe !== null ? mfe.toFixed(2) : "—"}% | Avg MAE ${mae !== null ? mae.toFixed(2) : "—"}%`;
+}
+
+// Weekly win-rate trend so you can see whether the model is improving, decaying, or
+// regime-sensitive over time. Same win definition as elsewhere (active excluded).
+function wibWeekStart(ms: number): number {
+  const d = wibDate(ms);
+  const dow = d.getUTCDay(); // 0=Sun..6=Sat (in WIB-shifted clock)
+  const monOffset = (dow + 6) % 7; // days since Monday
+  d.setUTCDate(d.getUTCDate() - monOffset);
+  d.setUTCHours(0, 0, 0, 0);
+  return d.getTime() - 7 * 60 * 60 * 1000; // back to real epoch (wibDate added +7h)
+}
+
+function PerformanceOverTime({ signals }: { signals: SignalLog[] }) {
+  const weeks = useMemo(() => {
+    const resolved = signals.filter((s) => s.outcome !== "active");
+    const m = new Map<number, { wins: number; n: number }>();
+    for (const r of resolved) {
+      const isWin = r.outcome === "tp1" || r.outcome === "tp2" || r.outcome === "tp3";
+      const isCounted = isWin || r.outcome === "sl" || r.outcome === "expired";
+      if (!isCounted) continue;
+      const wk = wibWeekStart(r.bar_time);
+      const cur = m.get(wk) ?? { wins: 0, n: 0 };
+      cur.n++; if (isWin) cur.wins++;
+      m.set(wk, cur);
+    }
+    return [...m.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([wk, v]) => ({ wk, n: v.n, winRate: v.n ? Math.round(v.wins / v.n * 100) : null }));
+  }, [signals]);
+
+  const fmtWeek = (ms: number) => {
+    const d = wibDate(ms);
+    return `${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+  };
+
+  return (
+    <div className="mb-4 rounded-md border border-neutral-800 bg-neutral-900/30 overflow-hidden">
+      <div className="px-3 py-2 text-xs uppercase tracking-wide text-neutral-500 border-b border-neutral-800">Performance over time (weekly)</div>
+      {weeks.length === 0 ? (
+        <div className="px-3 py-6 text-center text-neutral-500 text-sm">No resolved signals yet.</div>
+      ) : (
+        <div className="p-3 space-y-1.5">
+          {weeks.map((w) => {
+            const wr = w.winRate ?? 0;
+            const color = w.winRate === null ? "bg-neutral-700"
+              : w.winRate >= 55 ? "bg-emerald-500/70"
+              : w.winRate <= 35 ? "bg-red-500/70"
+              : "bg-neutral-500/70";
+            const small = w.n < 5; // de-emphasize thin samples
+            return (
+              <div key={w.wk} className={`flex items-center gap-2 text-xs ${small ? "opacity-50" : ""}`} title={`Week of ${fmtWeek(w.wk)} WIB · N=${w.n} · Win ${w.winRate ?? "—"}%`}>
+                <span className="w-12 shrink-0 tabular-nums text-neutral-500">{fmtWeek(w.wk)}</span>
+                <div className="flex-1 h-3 rounded bg-neutral-800 overflow-hidden">
+                  <div className={`h-full ${color}`} style={{ width: `${wr}%` }} />
+                </div>
+                <span className="w-10 shrink-0 text-right tabular-nums text-neutral-300">{w.winRate !== null ? `${w.winRate}%` : "—"}</span>
+                <span className="w-10 shrink-0 text-right tabular-nums text-neutral-600">N={w.n}</span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Selection edge: does the user's manual enter/skip tagging beat trading every signal?
