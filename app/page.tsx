@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { MarketRegime, ScanResult, Signal, SignalType, Timeframe } from "@/lib/types";
 import type { HistoryResult, SignalLog, RadarLog, Outcome } from "@/lib/db";
 
@@ -666,13 +666,9 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
   });
   const confidenceRows = historyPerformanceRows(signals, historyConfidenceBucket);
   const squeezeRows = historyPerformanceRows(signals, historySqueezeBucket);
-  const profileRows = historyPerformanceRows(signals, (row) => row.trigger_level || "unknown");
+  const profileRows = historyPerformanceRows(signals, historyProfileBucket);
   // TP2 magnet source — lets us compare VWAP-anchored vs pure-ATR target performance.
-  const tpSourceRows = historyPerformanceRows(signals, (row) =>
-    row.tp2_source === "vwap_daily" ? "TP2 daily VWAP"
-    : row.tp2_source === "vwap_weekly" ? "TP2 weekly VWAP"
-    : "TP2 pure ATR"
-  );
+  const tpSourceRows = historyPerformanceRows(signals, historyTpMagnetBucket);
 
   // New breakdown cards respect the confidence filter so they reflect the filtered subset.
   const confidenceSignals = confidenceFilter === "all"
@@ -726,6 +722,8 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
         <HistoryBreakdown title="Side" rows={sideRows} />
         <HistoryBreakdown title="Regime" rows={regimeRows} />
       </div>
+
+      <CrossTab signals={signals} />
 
       {filteredSignals.length === 0 ? (
         <div className="rounded-md border border-neutral-800 bg-neutral-900/40 p-8 text-center text-neutral-500 text-sm">
@@ -887,6 +885,186 @@ function historyPerformanceRows(
       avgMae: maeVals.length ? maeVals.reduce((a, b) => a + b, 0) / maeVals.length : null,
     };
   }).sort((a, b) => b.total - a.total);
+}
+
+function historyProfileBucket(row: SignalLog): string {
+  return row.trigger_level || "unknown";
+}
+
+function historyTpMagnetBucket(row: SignalLog): string {
+  return row.tp2_source === "vwap_daily" ? "TP2 daily VWAP"
+    : row.tp2_source === "vwap_weekly" ? "TP2 weekly VWAP"
+    : "TP2 pure ATR";
+}
+
+// ─── Cross-tab analysis ───────────────────────────────────────────────────────
+// Pivot any two breakdown dimensions against each other. Bucket functions are
+// reused from the breakdown cards so a signal lands in the same bucket here.
+type CrossTabDimKey = "confidence" | "sqz" | "profile" | "tpMagnet" | "timeOfDay" | "side" | "regime";
+
+interface CrossTabDim {
+  label: string;
+  bucketFor: (row: SignalLog) => string;
+  order: string[]; // preferred bucket ordering; unknown buckets are appended after.
+}
+
+// Dropdown order (and labels) per spec.
+const CROSS_TAB_DIM_ORDER: CrossTabDimKey[] = ["confidence", "sqz", "profile", "tpMagnet", "timeOfDay", "side", "regime"];
+
+const CROSS_TAB_DIMS: Record<CrossTabDimKey, CrossTabDim> = {
+  confidence: { label: "Confidence", bucketFor: historyConfidenceBucket, order: ["high", "medium", "low"] },
+  sqz:        { label: "SQZ", bucketFor: historySqueezeBucket, order: ["0", "1-2", "3-4", "5-6"] },
+  // Real trigger_level values: POC, VAL, VAH, PREV_POC, PREV_VAL, PREV_VAH.
+  profile:    { label: "Profile", bucketFor: historyProfileBucket, order: ["VAH", "VAL", "POC", "PREV_VAH", "PREV_VAL", "PREV_POC"] },
+  tpMagnet:   { label: "TP Magnet", bucketFor: historyTpMagnetBucket, order: ["TP2 pure ATR", "TP2 weekly VWAP", "TP2 daily VWAP"] },
+  timeOfDay:  { label: "Time of Day", bucketFor: historyTimeOfDayBucket, order: ["Asia", "Europe", "NY"] },
+  side:       { label: "Side", bucketFor: (row) => row.side, order: ["long", "short"] },
+  // Real regime values: neutral, flush, breakout (no "trend").
+  regime:     { label: "Regime", bucketFor: (row) => row.regime ?? "unknown", order: ["neutral", "flush", "breakout"] },
+};
+
+// Win = TP1/TP2/TP3, Loss = SL. Active + Expired are excluded from N and win rate.
+interface CrossCell {
+  wins: number;
+  losses: number;
+  mfeSum: number; mfeN: number;
+  maeSum: number; maeN: number;
+}
+
+function emptyCell(): CrossCell {
+  return { wins: 0, losses: 0, mfeSum: 0, mfeN: 0, maeSum: 0, maeN: 0 };
+}
+
+function addToCell(cell: CrossCell, row: SignalLog): void {
+  const isWin = row.outcome === "tp1" || row.outcome === "tp2" || row.outcome === "tp3";
+  const isLoss = row.outcome === "sl";
+  if (!isWin && !isLoss) return; // exclude active + expired
+  if (isWin) cell.wins++; else cell.losses++;
+  if (row.max_favorable !== null && row.entry_price) { cell.mfeSum += Math.abs(row.max_favorable) / row.entry_price * 100; cell.mfeN++; }
+  if (row.max_adverse !== null && row.entry_price)   { cell.maeSum += Math.abs(row.max_adverse)   / row.entry_price * 100; cell.maeN++; }
+}
+
+function cellN(c: CrossCell): number { return c.wins + c.losses; }
+function cellWinRate(c: CrossCell): number | null { const n = c.wins + c.losses; return n ? Math.round(c.wins / n * 100) : null; }
+
+function orderedBuckets(rows: SignalLog[], dim: CrossTabDim): string[] {
+  const present = new Set<string>();
+  for (const r of rows) present.add(dim.bucketFor(r));
+  const ordered = dim.order.filter((b) => present.has(b));
+  const extras = [...present].filter((b) => !dim.order.includes(b)).sort();
+  return [...ordered, ...extras];
+}
+
+function CrossTab({ signals }: { signals: SignalLog[] }) {
+  const [rowDim, setRowDim] = useState<CrossTabDimKey>("regime");
+  const [colDim, setColDim] = useState<CrossTabDimKey>("side");
+
+  // Row and column cannot be the same dimension.
+  function nextOtherDim(exclude: CrossTabDimKey): CrossTabDimKey {
+    return CROSS_TAB_DIM_ORDER.find((d) => d !== exclude) ?? "side";
+  }
+  function onRowChange(v: CrossTabDimKey) { setRowDim(v); if (v === colDim) setColDim(nextOtherDim(v)); }
+  function onColChange(v: CrossTabDimKey) { setColDim(v === rowDim ? nextOtherDim(v) : v); }
+
+  const pivot = useMemo(() => {
+    const rDim = CROSS_TAB_DIMS[rowDim];
+    const cDim = CROSS_TAB_DIMS[colDim];
+    const rowBuckets = orderedBuckets(signals, rDim);
+    const colBuckets = orderedBuckets(signals, cDim);
+    const cells = new Map<string, CrossCell>();
+    const rowTotals = new Map<string, CrossCell>();
+    const colTotals = new Map<string, CrossCell>();
+    const grand = emptyCell();
+    for (const rb of rowBuckets) rowTotals.set(rb, emptyCell());
+    for (const cb of colBuckets) colTotals.set(cb, emptyCell());
+    for (const row of signals) {
+      const rb = rDim.bucketFor(row);
+      const cb = cDim.bucketFor(row);
+      const key = `${rb} ${cb}`;
+      let cell = cells.get(key);
+      if (!cell) { cell = emptyCell(); cells.set(key, cell); }
+      addToCell(cell, row);
+      addToCell(rowTotals.get(rb)!, row);
+      addToCell(colTotals.get(cb)!, row);
+      addToCell(grand, row);
+    }
+    return { rowBuckets, colBuckets, cells, rowTotals, colTotals, grand };
+  }, [signals, rowDim, colDim]);
+
+  const dimSelect = (value: CrossTabDimKey, onChange: (v: CrossTabDimKey) => void) => (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value as CrossTabDimKey)}
+      className="min-h-[44px] rounded-md border border-neutral-700 bg-neutral-900 px-2 text-sm text-neutral-200 hover:border-neutral-500"
+    >
+      {CROSS_TAB_DIM_ORDER.map((k) => (
+        <option key={k} value={k}>{CROSS_TAB_DIMS[k].label}</option>
+      ))}
+    </select>
+  );
+
+  const cellOf = (rb: string, cb: string) => pivot.cells.get(`${rb} ${cb}`) ?? emptyCell();
+
+  const renderCell = (c: CrossCell) => {
+    const n = cellN(c);
+    const wr = cellWinRate(c);
+    if (n === 0 || wr === null) return <span className="text-neutral-600">—</span>;
+    return (
+      <div className="leading-tight">
+        <div className="text-neutral-400 text-xs">N={n}</div>
+        <div className="tabular-nums text-neutral-200">{wr}%</div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="mb-4 rounded-md border border-neutral-800 bg-neutral-900/30 overflow-hidden">
+      <div className="px-3 py-2 text-xs uppercase tracking-wide text-neutral-500 border-b border-neutral-800">
+        Cross-tab analysis
+      </div>
+      <div className="flex flex-wrap items-center gap-3 px-3 py-3">
+        <label className="flex items-center gap-2 text-xs uppercase tracking-wide text-neutral-500">
+          Row dimension {dimSelect(rowDim, onRowChange)}
+        </label>
+        <label className="flex items-center gap-2 text-xs uppercase tracking-wide text-neutral-500">
+          Column dimension {dimSelect(colDim, onColChange)}
+        </label>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="text-sm">
+          <thead className="text-neutral-500 text-left">
+            <tr className="border-t border-neutral-800">
+              <th className="px-3 py-2 font-normal sticky left-0 bg-neutral-900/60">
+                {CROSS_TAB_DIMS[rowDim].label} \ {CROSS_TAB_DIMS[colDim].label}
+              </th>
+              {pivot.colBuckets.map((cb) => (
+                <th key={cb} className="px-3 py-2 font-normal text-center whitespace-nowrap">{cb}</th>
+              ))}
+              <th className="px-3 py-2 font-medium text-center text-neutral-300 whitespace-nowrap">Total</th>
+            </tr>
+          </thead>
+          <tbody>
+            {pivot.rowBuckets.map((rb) => (
+              <tr key={rb} className="border-t border-neutral-800">
+                <td className="px-3 py-2 text-neutral-300 whitespace-nowrap sticky left-0 bg-neutral-900/60">{rb}</td>
+                {pivot.colBuckets.map((cb) => (
+                  <td key={cb} className="px-3 py-2 text-center">{renderCell(cellOf(rb, cb))}</td>
+                ))}
+                <td className="px-3 py-2 text-center bg-neutral-900/40">{renderCell(pivot.rowTotals.get(rb)!)}</td>
+              </tr>
+            ))}
+            <tr className="border-t border-neutral-700 bg-neutral-900/40">
+              <td className="px-3 py-2 font-medium text-neutral-300 sticky left-0 bg-neutral-900/60">Total</td>
+              {pivot.colBuckets.map((cb) => (
+                <td key={cb} className="px-3 py-2 text-center">{renderCell(pivot.colTotals.get(cb)!)}</td>
+              ))}
+              <td className="px-3 py-2 text-center font-medium">{renderCell(pivot.grand)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 }
 
 function HistoryBreakdown({ title, rows }: { title: string; rows: HistoryPerfRow[] }) {
