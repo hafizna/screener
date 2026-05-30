@@ -674,6 +674,14 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
     : "TP2 pure ATR"
   );
 
+  // New breakdown cards respect the confidence filter so they reflect the filtered subset.
+  const confidenceSignals = confidenceFilter === "all"
+    ? signals
+    : signals.filter((r) => historyConfidenceBucket(r) === confidenceFilter);
+  const timeOfDayRows = historyPerformanceRows(confidenceSignals, historyTimeOfDayBucket);
+  const sideRows      = historyPerformanceRows(confidenceSignals, (row) => row.side);
+  const regimeRows    = historyPerformanceRows(confidenceSignals, (row) => row.regime ?? "unknown");
+
   return (
     <div>
       {/* Stats bar */}
@@ -714,6 +722,9 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
         <HistoryBreakdown title="SQZ" rows={squeezeRows} />
         <HistoryBreakdown title="Profile" rows={profileRows} />
         <HistoryBreakdown title="TP magnet" rows={tpSourceRows} />
+        <HistoryBreakdown title="Time of day" rows={timeOfDayRows} />
+        <HistoryBreakdown title="Side" rows={sideRows} />
+        <HistoryBreakdown title="Regime" rows={regimeRows} />
       </div>
 
       {filteredSignals.length === 0 ? (
@@ -835,6 +846,14 @@ function historySqueezeBucket(row: SignalLog): string {
   if (sqz >= 3) return "3-4";
   if (sqz >= 1) return "1-2";
   return "0";
+}
+
+function historyTimeOfDayBucket(row: SignalLog): string {
+  // Non-overlapping WIB sessions: Asia 06-14, Europe 14-20, NY 20-06.
+  const h = wibDate(row.bar_time).getUTCHours();
+  if (h >= 6 && h < 14) return "Asia";
+  if (h >= 14 && h < 20) return "Europe";
+  return "NY";
 }
 
 function historyPerformanceRows(
