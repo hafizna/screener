@@ -181,6 +181,15 @@ export default function DashboardPage() {
           >
             {(tab === "history" ? histLoading : boardLoading || loading) ? "Loading…" : "Refresh"}
           </button>
+          {tab === "history" && history && history.signals.length > 0 && (
+            <button
+              onClick={() => downloadHistoryCsv(history.signals)}
+              className="px-3 py-1.5 text-sm rounded-md border border-neutral-700 hover:border-neutral-500 transition-colors"
+              title="Download all history rows as CSV (raw, ignores confidence filter)"
+            >
+              Download CSV
+            </button>
+          )}
         </div>
       </header>
 
@@ -891,6 +900,73 @@ function historyProfileBucket(row: SignalLog): string {
   return row.trigger_level || "unknown";
 }
 
+// ─── CSV export ───────────────────────────────────────────────────────────────
+function wibTimestamp(ms: number): string {
+  const d = wibDate(ms);
+  const yyyy = d.getUTCFullYear();
+  const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(d.getUTCDate()).padStart(2, "0");
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mi = String(d.getUTCMinutes()).padStart(2, "0");
+  const ss = String(d.getUTCSeconds()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+}
+
+function csvField(v: string | number | null): string {
+  if (v === null) return "";
+  const s = String(v);
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+// Build + download the raw (unfiltered) history as CSV, client-side. Derivations
+// reuse the same bucket helpers as the breakdown cards / cross-tab.
+function downloadHistoryCsv(signals: SignalLog[]): void {
+  const headers = [
+    "timestamp_wib", "symbol", "side", "regime", "type", "confidence", "sqz_bucket",
+    "profile", "tp_magnet", "entry", "sl", "tp1", "tp2", "tp3", "outcome",
+    "duration_minutes", "mfe_pct", "mae_pct", "time_of_day_session",
+  ];
+  const num2 = (n: number) => Number(n.toFixed(2)); // dot decimal, no thousand separators
+  const rows = signals.map((r) => {
+    const endMs = r.outcome_at ?? (r.outcome === "active" ? Date.now() : null);
+    const durationMin = endMs !== null ? Math.round((endMs - r.bar_time) / 60_000) : null;
+    const mfe = r.max_favorable !== null && r.entry_price ? num2(Math.abs(r.max_favorable) / r.entry_price * 100) : null;
+    const mae = r.max_adverse !== null && r.entry_price ? num2(Math.abs(r.max_adverse) / r.entry_price * 100) : null;
+    return [
+      wibTimestamp(r.bar_time),
+      r.symbol,
+      r.side,
+      r.regime ?? "",
+      r.signal_type ?? "",
+      historyConfidenceBucket(r),
+      historySqueezeBucket(r),
+      historyProfileBucket(r),
+      historyTpMagnetBucket(r),
+      r.entry_price,
+      r.sl,
+      r.tp1,
+      r.tp2,
+      r.tp3,
+      r.outcome,
+      durationMin,
+      mfe,
+      mae,
+      historyTimeOfDayBucket(r),
+    ].map(csvField).join(",");
+  });
+  // UTF-8 BOM (﻿) so Excel reads Unicode correctly.
+  const csv = "﻿" + [headers.join(","), ...rows].join("\r\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `mpz_screener_history_${wibTimestamp(Date.now()).slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
 function historyTpMagnetBucket(row: SignalLog): string {
   return row.tp2_source === "vwap_daily" ? "TP2 daily VWAP"
     : row.tp2_source === "vwap_weekly" ? "TP2 weekly VWAP"
@@ -1004,7 +1080,7 @@ function CrossTab({ signals }: { signals: SignalLog[] }) {
     for (const row of signals) {
       const rb = rDim.bucketFor(row);
       const cb = cDim.bucketFor(row);
-      const key = `${rb} ${cb}`;
+      const key = `${rb} ${cb}`;
       let cell = cells.get(key);
       if (!cell) { cell = emptyCell(); cells.set(key, cell); }
       addToCell(cell, row);
@@ -1039,7 +1115,7 @@ function CrossTab({ signals }: { signals: SignalLog[] }) {
     </select>
   );
 
-  const cellOf = (rb: string, cb: string) => pivot.cells.get(`${rb} ${cb}`) ?? emptyCell();
+  const cellOf = (rb: string, cb: string) => pivot.cells.get(`${rb} ${cb}`) ?? emptyCell();
 
   const renderCell = (c: CrossCell) => {
     const n = cellN(c);
