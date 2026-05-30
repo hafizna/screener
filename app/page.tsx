@@ -999,29 +999,31 @@ const CROSS_TAB_DIMS: Record<CrossTabDimKey, CrossTabDim> = {
   regime:     { label: "Regime", bucketFor: (row) => row.regime ?? "unknown", order: ["neutral", "flush", "breakout"] },
 };
 
-// Win = TP1/TP2/TP3, Loss = SL. Active + Expired are excluded from N and win rate.
+// Win = TP1/TP2/TP3, Loss = SL, Expired = timed out. Win rate = wins / (wins+losses+expired),
+// matching the breakdown cards & headline. Only "active" (running) trades are excluded.
 interface CrossCell {
   wins: number;
   losses: number;
+  expired: number;
   mfeSum: number; mfeN: number;
   maeSum: number; maeN: number;
 }
 
 function emptyCell(): CrossCell {
-  return { wins: 0, losses: 0, mfeSum: 0, mfeN: 0, maeSum: 0, maeN: 0 };
+  return { wins: 0, losses: 0, expired: 0, mfeSum: 0, mfeN: 0, maeSum: 0, maeN: 0 };
 }
 
 function addToCell(cell: CrossCell, row: SignalLog): void {
-  const isWin = row.outcome === "tp1" || row.outcome === "tp2" || row.outcome === "tp3";
-  const isLoss = row.outcome === "sl";
-  if (!isWin && !isLoss) return; // exclude active + expired
-  if (isWin) cell.wins++; else cell.losses++;
+  if (row.outcome === "active") return; // running trades aren't resolved yet
+  if (row.outcome === "sl") cell.losses++;
+  else if (row.outcome === "expired") cell.expired++;
+  else cell.wins++; // tp1 / tp2 / tp3
   if (row.max_favorable !== null && row.entry_price) { cell.mfeSum += Math.abs(row.max_favorable) / row.entry_price * 100; cell.mfeN++; }
   if (row.max_adverse !== null && row.entry_price)   { cell.maeSum += Math.abs(row.max_adverse)   / row.entry_price * 100; cell.maeN++; }
 }
 
-function cellN(c: CrossCell): number { return c.wins + c.losses; }
-function cellWinRate(c: CrossCell): number | null { const n = c.wins + c.losses; return n ? Math.round(c.wins / n * 100) : null; }
+function cellN(c: CrossCell): number { return c.wins + c.losses + c.expired; }
+function cellWinRate(c: CrossCell): number | null { const n = cellN(c); return n ? Math.round(c.wins / n * 100) : null; }
 
 function orderedBuckets(rows: SignalLog[], dim: CrossTabDim): string[] {
   const present = new Set<string>();
@@ -1051,7 +1053,7 @@ function cellTooltip(c: CrossCell): string | undefined {
   const wr = cellWinRate(c);
   const mfe = cellAvgMfe(c);
   const mae = cellAvgMae(c);
-  return `N=${n} | Win ${wr}% | Avg MFE ${mfe !== null ? mfe.toFixed(2) : "—"}% | Avg MAE ${mae !== null ? mae.toFixed(2) : "—"}%`;
+  return `N=${n} | Win ${wr}% | ${c.wins}W ${c.losses}L ${c.expired}Exp | Avg MFE ${mfe !== null ? mfe.toFixed(2) : "—"}% | Avg MAE ${mae !== null ? mae.toFixed(2) : "—"}%`;
 }
 
 function CrossTab({ signals }: { signals: SignalLog[] }) {
@@ -1091,15 +1093,15 @@ function CrossTab({ signals }: { signals: SignalLog[] }) {
     return { rowBuckets, colBuckets, cells, rowTotals, colTotals, grand };
   }, [signals, rowDim, colDim]);
 
-  // Resolved (win/loss) trades behind the clicked intersection cell, for the modal.
+  // Resolved trades (win/loss/expired, i.e. non-active) behind the clicked cell.
   const selectedTrades = useMemo(() => {
     if (!selected) return [];
     const rDim = CROSS_TAB_DIMS[rowDim];
     const cDim = CROSS_TAB_DIMS[colDim];
     return signals.filter((row) =>
+      row.outcome !== "active" &&
       rDim.bucketFor(row) === selected.rb &&
-      cDim.bucketFor(row) === selected.cb &&
-      (row.outcome === "tp1" || row.outcome === "tp2" || row.outcome === "tp3" || row.outcome === "sl")
+      cDim.bucketFor(row) === selected.cb
     );
   }, [selected, signals, rowDim, colDim]);
 
@@ -1215,14 +1217,16 @@ function CrossTab({ signals }: { signals: SignalLog[] }) {
 function CrossTabCellModal({ title, trades, onClose }: { title: string; trades: SignalLog[]; onClose: () => void }) {
   const wins = trades.filter((t) => t.outcome === "tp1" || t.outcome === "tp2" || t.outcome === "tp3").length;
   const losses = trades.filter((t) => t.outcome === "sl").length;
-  const wr = wins + losses ? Math.round(wins / (wins + losses) * 100) : null;
+  const expired = trades.filter((t) => t.outcome === "expired").length;
+  const n = wins + losses + expired;
+  const wr = n ? Math.round(wins / n * 100) : null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-3" onClick={onClose}>
       <div className="w-full max-w-2xl max-h-[80vh] overflow-hidden rounded-lg border border-neutral-700 bg-neutral-950 flex flex-col" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-4 py-3">
           <div>
             <div className="text-sm font-medium text-neutral-200">{title}</div>
-            <div className="text-xs text-neutral-500">N={wins + losses} · Win {wr !== null ? `${wr}%` : "—"} · {wins}W / {losses}L</div>
+            <div className="text-xs text-neutral-500">N={n} · Win {wr !== null ? `${wr}%` : "—"} · {wins}W / {losses}L / {expired}Exp</div>
           </div>
           <button onClick={onClose} className="px-2 py-1 text-sm rounded-md border border-neutral-700 hover:border-neutral-500 text-neutral-400 hover:text-neutral-200">✕</button>
         </div>
