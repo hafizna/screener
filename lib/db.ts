@@ -2,9 +2,11 @@ import { neon } from "@neondatabase/serverless";
 import type { Signal } from "./types";
 import { MODEL_PARAMS_HASH, MODEL_PARAMS_JSON, MODEL_VERSION } from "./model";
 
+// Resolved signals are the model-performance record (feature snapshots live on them),
+// so we keep them effectively forever by default. Pruning never touches resolved rows.
 const SIGNAL_RETENTION_DAYS = Math.max(
   1,
-  parseInt(process.env.SIGNAL_RETENTION_DAYS ?? "14", 10) || 14
+  parseInt(process.env.SIGNAL_RETENTION_DAYS ?? "3650", 10) || 3650
 );
 const SIGNAL_PRUNE_ENABLED = process.env.SIGNAL_PRUNE_ENABLED === "true";
 
@@ -573,9 +575,12 @@ export async function pruneOldSignals(): Promise<number> {
   if (!sql) return 0;
   if (!SIGNAL_PRUNE_ENABLED) return 0;
   const cutoff = Date.now() - SIGNAL_RETENTION_DAYS * 24 * 60 * 60_000;
+  // Only sweep unresolved orphans (still 'active' past the window). Resolved signals
+  // — tp1/tp2/tp3/sl/expired — are the performance record and are never deleted.
   const rows = await sql`
     DELETE FROM signal_log
     WHERE bar_time < ${cutoff}
+      AND outcome = 'active'
     RETURNING id
   ` as Array<{ id: string }>;
   return rows.length;
