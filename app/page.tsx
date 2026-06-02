@@ -398,7 +398,6 @@ function SignalTracePanel({ row, resolvedCount }: { row: BoardTrade | null; reso
   const best = trace.length ? Math.max(...trace.map((t) => t.move_pct)) : null;
   const worst = trace.length ? Math.min(...trace.map((t) => t.move_pct)) : null;
   const latestPct = currentPct ?? lastTrace?.move_pct ?? null;
-  const progressWidth = latestPct === null ? 50 : Math.max(0, Math.min(100, 50 + latestPct * 10));
 
   return (
     <div className="space-y-3">
@@ -426,18 +425,7 @@ function SignalTracePanel({ row, resolvedCount }: { row: BoardTrade | null; reso
           <TraceMetric label="Worst" value={worst !== null ? formatSignedPct(worst) : "—"} tone="bad" />
         </div>
 
-        <div className="mt-3 h-2 rounded bg-neutral-800 overflow-hidden" title="Center is entry; right is gain, left is loss. Scale is capped for readability.">
-          <div className="relative h-full">
-            <div className="absolute left-1/2 top-0 h-full w-px bg-neutral-500" />
-            <div
-              className={`absolute top-0 h-full ${latestPct !== null && latestPct >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
-              style={{
-                left: latestPct !== null && latestPct >= 0 ? "50%" : `${progressWidth}%`,
-                width: latestPct !== null ? `${Math.abs(progressWidth - 50)}%` : "0%",
-              }}
-            />
-          </div>
-        </div>
+        <TradeProgressBar row={row} latestPct={latestPct} best={best} worst={worst} />
       </CardShell>
 
       {trace.length === 0 ? (
@@ -465,6 +453,96 @@ function TraceMetric({ label, value, tone }: { label: string; value: string; ton
     <div>
       <div className="text-neutral-500">{label}</div>
       <div className={`mt-0.5 tabular-nums ${cls}`}>{value}</div>
+    </div>
+  );
+}
+
+// Price-geometry progress bar. The axis runs from SL (far-left edge) through entry,
+// TP1, TP2, to TP3 (far-right edge), positioned by actual price. A faint staged-green
+// zone marks the max-favorable reach; a solid fill marks the current price; floating
+// labels surface the SL price, staged TP ticks, and the live "now" price.
+function TradeProgressBar({ row, latestPct, best, worst }: {
+  row: BoardTrade; latestPct: number | null; best: number | null; worst: number | null;
+}) {
+  const { side, entry_price: entry, sl, tp1, tp2, tp3, current_price: current } = row;
+  const haveGeom = sl != null && tp3 != null && entry > 0;
+  const dir = (p: number) => (side === "long" ? p - (sl as number) : (sl as number) - p);
+  const span = haveGeom ? dir(tp3 as number) : 0;
+
+  // Fall back to the old centered move bar when SL/TP3 geometry is unavailable.
+  if (!haveGeom || !(span > 0)) {
+    const w = latestPct === null ? 50 : Math.max(0, Math.min(100, 50 + latestPct * 10));
+    return (
+      <div className="mt-3 h-2 rounded bg-neutral-800 overflow-hidden" title="Center is entry; right is gain, left is loss.">
+        <div className="relative h-full">
+          <div className="absolute left-1/2 top-0 h-full w-px bg-neutral-500" />
+          <div className={`absolute top-0 h-full ${latestPct !== null && latestPct >= 0 ? "bg-emerald-500" : "bg-red-500"}`}
+            style={{ left: latestPct !== null && latestPct >= 0 ? "50%" : `${w}%`, width: latestPct !== null ? `${Math.abs(w - 50)}%` : "0%" }} />
+        </div>
+      </div>
+    );
+  }
+
+  const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+  const pos = (p: number) => clamp01(dir(p) / span);
+  const pctL = (x: number) => `${(x * 100).toFixed(2)}%`;
+  // Convert a side-adjusted favorable move % back into a price, then onto the axis.
+  const priceFromMove = (m: number) => entry * (1 + (m / 100) * (side === "long" ? 1 : -1));
+
+  const entryPos = pos(entry);
+  const tp1Pos = tp1 != null ? pos(tp1) : null;
+  const tp2Pos = tp2 != null ? pos(tp2) : null;
+  const curPos = current != null ? pos(current) : null;
+  const peakPos = best != null ? pos(priceFromMove(best)) : null;
+  const worstPos = worst != null ? pos(priceFromMove(worst)) : null;
+
+  const up = current != null ? dir(current) >= dir(entry) : true;
+  const fillA = curPos != null ? Math.min(entryPos, curPos) : entryPos;
+  const fillB = curPos != null ? Math.max(entryPos, curPos) : entryPos;
+
+  const Tick = ({ at, cls, title }: { at: number; cls: string; title?: string }) => (
+    <div className={`absolute top-0 h-full w-px ${cls}`} style={{ left: pctL(at) }} title={title} />
+  );
+
+  return (
+    <div className="mt-4">
+      {/* floating NOW price + pct, tracking the current position */}
+      <div className="relative h-3 text-[10px]">
+        {curPos != null && (
+          <span className="absolute -translate-x-1/2 whitespace-nowrap tabular-nums text-neutral-200" style={{ left: pctL(curPos) }}>
+            {formatPrice(current as number)}{latestPct != null ? ` ${formatSignedPct(latestPct)}` : ""}
+          </span>
+        )}
+      </div>
+
+      {/* SL (left edge) → entry → TP1 → TP2 → TP3 (right edge) */}
+      <div className="relative h-2.5 rounded bg-neutral-800 overflow-hidden"
+        title={`SL ${formatPrice(sl as number)} · entry ${formatPrice(entry)} · TP1 ${tp1 != null ? formatPrice(tp1) : "—"} · TP2 ${tp2 != null ? formatPrice(tp2) : "—"} · TP3 ${formatPrice(tp3 as number)}`}>
+        {/* staged max-favorable reach */}
+        {peakPos != null && peakPos > entryPos && (
+          <div className="absolute top-0 h-full bg-emerald-500/25" style={{ left: pctL(entryPos), width: pctL(peakPos - entryPos) }} />
+        )}
+        {/* adverse reach toward SL */}
+        {worstPos != null && worstPos < entryPos && (
+          <div className="absolute top-0 h-full bg-red-500/20" style={{ left: pctL(worstPos), width: pctL(entryPos - worstPos) }} />
+        )}
+        {/* solid current fill */}
+        <div className={`absolute top-0 h-full ${up ? "bg-emerald-500" : "bg-red-500"}`}
+          style={{ left: pctL(fillA), width: pctL(fillB - fillA) }} />
+        {/* stage separators */}
+        <Tick at={entryPos} cls="bg-neutral-300" title={`entry ${formatPrice(entry)}`} />
+        {tp1Pos != null && <Tick at={tp1Pos} cls="bg-emerald-200/70" title={`TP1 ${formatPrice(tp1 as number)}`} />}
+        {tp2Pos != null && <Tick at={tp2Pos} cls="bg-emerald-200/70" title={`TP2 ${formatPrice(tp2 as number)}`} />}
+      </div>
+
+      {/* price labels: SL price (left), TP3 price (right); staged TP/entry ticks below */}
+      <div className="relative h-6 mt-0.5 text-[9px] tabular-nums">
+        <span className="absolute left-0 text-red-400" title="Stop loss">SL {formatPrice(sl as number)}</span>
+        <span className="absolute right-0 text-cyan-400" title="TP3 swing">{formatPrice(tp3 as number)}</span>
+        <span className="absolute -translate-x-1/2 text-neutral-500 top-3" style={{ left: pctL(entryPos) }} title={`entry ${formatPrice(entry)}`}>E</span>
+        {tp1Pos != null && <span className="absolute -translate-x-1/2 text-emerald-300/80 top-3" style={{ left: pctL(tp1Pos) }}>TP1</span>}
+        {tp2Pos != null && <span className="absolute -translate-x-1/2 text-emerald-300/80 top-3" style={{ left: pctL(tp2Pos) }}>TP2</span>}
+      </div>
     </div>
   );
 }
