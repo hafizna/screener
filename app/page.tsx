@@ -804,6 +804,10 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
   const timeOfDayRows = historyPerformanceRows(confidenceSignals, historyTimeOfDayBucket);
   const sideRows      = historyPerformanceRows(confidenceSignals, (row) => row.side);
   const regimeRows    = historyPerformanceRows(confidenceSignals, (row) => row.regime ?? "unknown");
+  // BTC context cards (snapshotted at fire time; respect the confidence filter).
+  const btc15mRows  = historyPerformanceRows(confidenceSignals, historyBtc15mBucket);
+  const btc1hRows   = historyPerformanceRows(confidenceSignals, historyBtc1hBucket);
+  const btcVolRows  = historyPerformanceRows(confidenceSignals, historyBtcVolBucket);
 
   const RENDER_CAP = 500;
   const visibleSignals = filteredSignals.slice(0, RENDER_CAP);
@@ -860,6 +864,9 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
         <HistoryBreakdown title="Time of day" rows={timeOfDayRows} />
         <HistoryBreakdown title="Side" rows={sideRows} />
         <HistoryBreakdown title="Regime" rows={regimeRows} />
+        <HistoryBreakdown title="BTC 15m return" rows={btc15mRows} />
+        <HistoryBreakdown title="BTC 1h return" rows={btc1hRows} />
+        <HistoryBreakdown title="BTC volatility 24h" rows={btcVolRows} />
       </div>
 
       <SelectionEdgePanel signals={signals} />
@@ -1093,6 +1100,7 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
     "timestamp_wib", "symbol", "side", "regime", "type", "confidence", "sqz_bucket",
     "ex_value", "profile", "tp_magnet", "entry", "sl", "tp1", "tp2", "tp3", "outcome", "r_outcome",
     "duration_minutes", "mfe_pct", "mae_pct", "time_of_day_session",
+    "btc_return_15m_pct", "btc_return_1h_pct", "btc_realized_vol_24h_pct",
   ];
   const num2 = (n: number) => Number(n.toFixed(2)); // dot decimal, no thousand separators
   const rows = signals.map((r) => {
@@ -1123,6 +1131,9 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
       mfe,
       mae,
       historyTimeOfDayBucket(r),
+      r.btc_return_15m_pct !== null ? num2(r.btc_return_15m_pct) : null,
+      r.btc_return_1h_pct !== null ? num2(r.btc_return_1h_pct) : null,
+      r.btc_realized_vol_24h_pct !== null ? num2(r.btc_realized_vol_24h_pct) : null,
     ].map(csvField).join(",");
   });
   // UTF-8 BOM (﻿) so Excel reads Unicode correctly.
@@ -1148,6 +1159,35 @@ function historyExBucket(row: SignalLog): string {
   return "3.5+";
 }
 
+// BTC context buckets — value snapshotted at fire time (nullable until backfilled).
+function historyBtc15mBucket(row: SignalLog): string {
+  const v = row.btc_return_15m_pct;
+  if (v === null) return "unknown";
+  if (v < -0.5) return "Strong down";
+  if (v < -0.1) return "Mild down";
+  if (v <= 0.1) return "Flat";
+  if (v <= 0.5) return "Mild up";
+  return "Strong up";
+}
+
+function historyBtc1hBucket(row: SignalLog): string {
+  const v = row.btc_return_1h_pct;
+  if (v === null) return "unknown";
+  if (v < -1.0) return "Strong down";
+  if (v < -0.3) return "Mild down";
+  if (v <= 0.3) return "Flat";
+  if (v <= 1.0) return "Mild up";
+  return "Strong up";
+}
+
+function historyBtcVolBucket(row: SignalLog): string {
+  const v = row.btc_realized_vol_24h_pct;
+  if (v === null) return "unknown";
+  if (v < 1.5) return "Low";
+  if (v <= 3.0) return "Medium";
+  return "High";
+}
+
 function historyTpMagnetBucket(row: SignalLog): string {
   return row.tp2_source === "vwap_daily" ? "TP2 daily VWAP"
     : row.tp2_source === "vwap_weekly" ? "TP2 weekly VWAP"
@@ -1157,7 +1197,7 @@ function historyTpMagnetBucket(row: SignalLog): string {
 // ─── Cross-tab analysis ───────────────────────────────────────────────────────
 // Pivot any two breakdown dimensions against each other. Bucket functions are
 // reused from the breakdown cards so a signal lands in the same bucket here.
-type CrossTabDimKey = "confidence" | "sqz" | "ex" | "profile" | "tpMagnet" | "timeOfDay" | "side" | "regime" | "signalType" | "bias1h" | "bias4h" | "frBias" | "oiBias" | "lsBias" | "rsBias" | "deltaBias";
+type CrossTabDimKey = "confidence" | "sqz" | "ex" | "profile" | "tpMagnet" | "timeOfDay" | "side" | "regime" | "signalType" | "bias1h" | "bias4h" | "frBias" | "oiBias" | "lsBias" | "rsBias" | "deltaBias" | "btc15m" | "btc1h" | "btcVol";
 
 interface CrossTabDim {
   label: string;
@@ -1166,7 +1206,7 @@ interface CrossTabDim {
 }
 
 // Dropdown order (and labels) per spec.
-const CROSS_TAB_DIM_ORDER: CrossTabDimKey[] = ["confidence", "sqz", "ex", "profile", "tpMagnet", "timeOfDay", "side", "regime", "signalType", "bias1h", "bias4h", "frBias", "oiBias", "lsBias", "rsBias", "deltaBias"];
+const CROSS_TAB_DIM_ORDER: CrossTabDimKey[] = ["confidence", "sqz", "ex", "profile", "tpMagnet", "timeOfDay", "side", "regime", "signalType", "bias1h", "bias4h", "frBias", "oiBias", "lsBias", "rsBias", "deltaBias", "btc15m", "btc1h", "btcVol"];
 
 const CROSS_TAB_DIMS: Record<CrossTabDimKey, CrossTabDim> = {
   confidence: { label: "Confidence", bucketFor: historyConfidenceBucket, order: ["high", "medium", "low"] },
@@ -1188,6 +1228,10 @@ const CROSS_TAB_DIMS: Record<CrossTabDimKey, CrossTabDim> = {
   lsBias:     { label: "L/S ratio", bucketFor: (row) => row.ls_bias ?? "unknown", order: ["crowded_shorts", "balanced", "crowded_longs"] },
   rsBias:     { label: "Rel. strength", bucketFor: (row) => row.rs_bias ?? "unknown", order: ["strong", "neutral", "weak"] },
   deltaBias:  { label: "Taker delta", bucketFor: (row) => row.delta_bias ?? "unknown", order: ["aligned", "neutral", "opposed"] },
+  // ── BTC context dimensions (snapshotted at fire time) ──
+  btc15m:     { label: "BTC 15m Return", bucketFor: historyBtc15mBucket, order: ["Strong down", "Mild down", "Flat", "Mild up", "Strong up"] },
+  btc1h:      { label: "BTC 1h Return", bucketFor: historyBtc1hBucket, order: ["Strong down", "Mild down", "Flat", "Mild up", "Strong up"] },
+  btcVol:     { label: "BTC Volatility", bucketFor: historyBtcVolBucket, order: ["Low", "Medium", "High"] },
 };
 
 // Win = TP1/TP2/TP3, Loss = SL, Expired = timed out. Win rate = wins / (wins+losses+expired),

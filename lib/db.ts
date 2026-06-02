@@ -143,6 +143,10 @@ export async function ensureSchema() {
   // Genealogy: when a fired signal was on the radar first, this records when the
   // radar candidate was initially detected — so the board can trace radar → fired.
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS radar_first_seen BIGINT`;
+  // BTC context snapshotted at signal-fire time (nullable; backfilled for history).
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS btc_return_15m_pct REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS btc_return_1h_pct REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS btc_realized_vol_24h_pct REAL`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_outcome  ON signal_log(outcome)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_bar_time ON signal_log(bar_time DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_symbol   ON signal_log(symbol)`;
@@ -232,8 +236,30 @@ export async function ensureSchema() {
   await sql`CREATE INDEX IF NOT EXISTS idx_sts_signal  ON signal_trace_snapshots(signal_id, observed_at DESC)`;
 }
 
+// Down-migration for the BTC context columns (Task 3). Reversible counterpart to the
+// ADD COLUMN statements above — drops only the BTC fields, leaving the rest intact.
+export async function dropBtcContextColumns() {
+  const sql = getDb();
+  if (!sql) return;
+  await sql`ALTER TABLE signal_log DROP COLUMN IF EXISTS btc_return_15m_pct`;
+  await sql`ALTER TABLE signal_log DROP COLUMN IF EXISTS btc_return_1h_pct`;
+  await sql`ALTER TABLE signal_log DROP COLUMN IF EXISTS btc_realized_vol_24h_pct`;
+}
+
 // ─── Write path ───────────────────────────────────────────────────────────────
-export async function insertSignal(s: Signal, scannedAt: number, regime?: string, radarFirstSeen?: number | null): Promise<boolean> {
+export interface BtcContextSnapshot {
+  btcReturn15mPct: number | null;
+  btcReturn1hPct: number | null;
+  btcRealizedVol24hPct: number | null;
+}
+
+export async function insertSignal(
+  s: Signal,
+  scannedAt: number,
+  regime?: string,
+  radarFirstSeen?: number | null,
+  btc?: BtcContextSnapshot | null,
+): Promise<boolean> {
   const sql = getDb();
   if (!sql) return false;
   const rows = await sql`
@@ -246,7 +272,8 @@ export async function insertSignal(s: Signal, scannedAt: number, regime?: string
        relative_strength, rs_bias, taker_buy_ratio, delta_bias, atr_1h,
        bar_high, bar_low, distance_from_level, near_vwap, near_weekly_vwap,
        near_pdh, near_pdl, from_watchlist, bar_time, scanned_at,
-       tp2_source, tp3_source, radar_first_seen)
+       tp2_source, tp3_source, radar_first_seen,
+       btc_return_15m_pct, btc_return_1h_pct, btc_realized_vol_24h_pct)
     VALUES (
       ${`${s.symbol}-${s.timeframe}-${s.barTime}`},
       ${s.symbol}, ${s.timeframe}, ${s.side},
@@ -267,7 +294,9 @@ export async function insertSignal(s: Signal, scannedAt: number, regime?: string
       ${s.nearPdl ?? null}, ${s.fromWatchlist ?? false},
       ${s.barTime}, ${scannedAt},
       ${s.tp2Source ?? null}, ${s.tp3Source ?? null},
-      ${radarFirstSeen ?? null}
+      ${radarFirstSeen ?? null},
+      ${btc?.btcReturn15mPct ?? null}, ${btc?.btcReturn1hPct ?? null},
+      ${btc?.btcRealizedVol24hPct ?? null}
     )
     ON CONFLICT (id) DO NOTHING
     RETURNING id
@@ -348,6 +377,9 @@ export interface SignalLog {
   user_action: string | null;
   user_action_at: number | null;
   radar_first_seen: number | null;
+  btc_return_15m_pct: number | null;
+  btc_return_1h_pct: number | null;
+  btc_realized_vol_24h_pct: number | null;
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -434,6 +466,9 @@ function normalizeSignalLog(row: unknown): SignalLog {
     user_action: typeof r.user_action === "string" ? r.user_action : null,
     user_action_at: toNullableNumber(r.user_action_at),
     radar_first_seen: toNullableNumber(r.radar_first_seen),
+    btc_return_15m_pct: toNullableNumber(r.btc_return_15m_pct),
+    btc_return_1h_pct: toNullableNumber(r.btc_return_1h_pct),
+    btc_realized_vol_24h_pct: toNullableNumber(r.btc_realized_vol_24h_pct),
   };
 }
 
@@ -976,4 +1011,30 @@ export async function pruneStaleRadar(cutoffMs: number): Promise<number> {
     RETURNING id
   ` as Array<{ id: string }>;
   return rows.length;
+}
+
+// ─── BTC context backfill ───────────────────────────────────────────────────────
+// Signals missing a BTC context snapshot. Resumable: a re-run only returns rows that
+// still have no btc_return_15m_pct, so an interrupted backfill picks up where it left.
+export async function getSignalsMissingBtcContext(): Promise<Array<{ id: string; bar_time: number }>> {
+  const sql = getDb();
+  if (!sql) return [];
+  const rows = await sql`
+    SELECT id, bar_time FROM signal_log
+    WHERE btc_return_15m_pct IS NULL
+    ORDER BY bar_time ASC
+  ` as Array<{ id: string; bar_time: unknown }>;
+  return rows.map((r) => ({ id: String(r.id), bar_time: toNumber(r.bar_time) }));
+}
+
+export async function updateSignalBtcContext(id: string, btc: BtcContextSnapshot): Promise<void> {
+  const sql = getDb();
+  if (!sql) return;
+  await sql`
+    UPDATE signal_log SET
+      btc_return_15m_pct = ${btc.btcReturn15mPct},
+      btc_return_1h_pct = ${btc.btcReturn1hPct},
+      btc_realized_vol_24h_pct = ${btc.btcRealizedVol24hPct}
+    WHERE id = ${id}
+  `;
 }

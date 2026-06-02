@@ -16,6 +16,7 @@ import { dailyVwap, weeklyVwap } from "@/lib/vwap";
 import { computeTargets } from "@/lib/targets";
 import { storeScanResult, loadLatestScan } from "@/lib/kv";
 import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, updateBestTP, expireOldSignals, pruneOldSignals, upsertRadarCandidates, markRadarFired, pruneStaleRadar, insertScanFunnel, insertSignalTraceSnapshot } from "@/lib/db";
+import { getBtcContextLive } from "@/lib/btc";
 import type { RadarUpsert } from "@/lib/db";
 import { resolveOutcome } from "@/lib/outcomes";
 import { MODEL_PARAMS_HASH, MODEL_VERSION } from "@/lib/model";
@@ -349,11 +350,19 @@ export async function GET(req: NextRequest) {
     // 7a. Insert new signals (ON CONFLICT DO NOTHING, so re-runs are safe).
     //     If a signal came from the radar, mark that radar candidate fired and
     //     copy its first-seen time onto the signal so the board can trace it.
+    //     Snapshot BTC context once per scan (cached 60s) — all signals fired in
+    //     this scan share the same moment, so they get the same BTC backdrop.
+    const btcContext = signals.length > 0
+      ? await getBtcContextLive(scanResult.scannedAt).catch((e: Error) => {
+          console.warn("BTC context fetch failed:", e.message);
+          return null;
+        })
+      : null;
     const inserted = await Promise.all(signals.map(async (s) => {
       const radarFirstSeen = s.fromWatchlist
         ? await markRadarFired(s.symbol, s.side, scanResult.scannedAt).catch(() => null)
         : null;
-      return insertSignal(s, scanResult.scannedAt, regime, radarFirstSeen);
+      return insertSignal(s, scanResult.scannedAt, regime, radarFirstSeen, btcContext);
     }));
     dbSignalsInserted = inserted.filter(Boolean).length;
 
