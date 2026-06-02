@@ -1304,8 +1304,9 @@ function cellTooltip(c: CrossCell): string | undefined {
   return `N=${n} | Win ${wr}% | E ${eStr} | MFE ${mfe !== null ? mfe.toFixed(2) : "—"}% | MAE ${mae !== null ? mae.toFixed(2) : "—"}%`;
 }
 
-// Weekly win-rate trend so you can see whether the model is improving, decaying, or
-// regime-sensitive over time. Same win definition as elsewhere (active excluded).
+// Period bucketing for the Performance-over-time card. Both return the real-epoch
+// start of the WIB day / ISO-week containing `ms` (wibDate adds +7h, so we subtract
+// it back at the end).
 function wibWeekStart(ms: number): number {
   const d = wibDate(ms);
   const dow = d.getUTCDay(); // 0=Sun..6=Sat (in WIB-shifted clock)
@@ -1315,56 +1316,205 @@ function wibWeekStart(ms: number): number {
   return d.getTime() - 7 * 60 * 60 * 1000; // back to real epoch (wibDate added +7h)
 }
 
-function PerformanceOverTime({ signals }: { signals: SignalLog[] }) {
-  const weeks = useMemo(() => {
-    const resolved = signals.filter((s) => s.outcome !== "active");
-    const m = new Map<number, { wins: number; n: number }>();
-    for (const r of resolved) {
-      const isWin = r.outcome === "tp1" || r.outcome === "tp2" || r.outcome === "tp3";
-      const isCounted = isWin || r.outcome === "sl" || r.outcome === "expired";
-      if (!isCounted) continue;
-      const wk = wibWeekStart(r.bar_time);
-      const cur = m.get(wk) ?? { wins: 0, n: 0 };
-      cur.n++; if (isWin) cur.wins++;
-      m.set(wk, cur);
-    }
-    return [...m.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([wk, v]) => ({ wk, n: v.n, winRate: v.n ? Math.round(v.wins / v.n * 100) : null }));
-  }, [signals]);
+function wibDayStart(ms: number): number {
+  const d = wibDate(ms);
+  d.setUTCHours(0, 0, 0, 0);
+  return d.getTime() - 7 * 60 * 60 * 1000;
+}
 
-  const fmtWeek = (ms: number) => {
-    const d = wibDate(ms);
-    return `${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+// Win rate + expectancy for a set of trades (active excluded), matching the
+// definitions used by the breakdown cards and cross-tab.
+function periodGroupStats(rows: SignalLog[]): { n: number; winRate: number | null; expectancy: number | null } {
+  let wins = 0, losses = 0, expired = 0;
+  const rs: number[] = [];
+  for (const r of rows) {
+    if (r.outcome === "active") continue;
+    if (r.outcome === "sl") losses++;
+    else if (r.outcome === "expired") expired++;
+    else wins++;
+    const v = computeROutcome(r);
+    if (v !== null) rs.push(v);
+  }
+  const n = wins + losses + expired;
+  return {
+    n,
+    winRate: n ? Math.round(wins / n * 100) : null,
+    expectancy: rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : null,
+  };
+}
+
+type PerfPeriod = "daily" | "weekly";
+type PerfMetric = "winRate" | "expectancy" | "both";
+type PerfGroupKey = "overall" | CrossTabDimKey;
+
+// Group-by options per spec. Non-"overall" keys reuse the cross-tab bucket helpers,
+// so a trade lands in the same bucket here as everywhere else.
+const PERF_GROUP_OPTIONS: Array<{ key: PerfGroupKey; label: string }> = [
+  { key: "overall",   label: "Overall" },
+  { key: "confidence", label: "Confidence" },
+  { key: "sqz",       label: "SQZ" },
+  { key: "profile",   label: "Profile" },
+  { key: "tpMagnet",  label: "TP Magnet" },
+  { key: "timeOfDay", label: "Time of Day" },
+  { key: "side",      label: "Side" },
+  { key: "regime",    label: "Regime" },
+  { key: "ex",        label: "EX Multiplier" },
+  { key: "btc15m",    label: "BTC 15m" },
+  { key: "btc1h",     label: "BTC 1h" },
+  { key: "btcVol",    label: "BTC Vol" },
+];
+
+const PERF_MAX_PERIODS = 14; // cap visible columns to the most recent N periods
+const PERF_MIN_N = 5;        // hide cells / de-emphasize bars below this sample size
+
+function fmtPeriodLabel(ms: number): string {
+  const d = wibDate(ms);
+  return `${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+function PerformanceOverTime({ signals }: { signals: SignalLog[] }) {
+  const [period, setPeriod] = useState<PerfPeriod>("daily");
+  const [groupBy, setGroupBy] = useState<PerfGroupKey>("overall");
+  const [metric, setMetric] = useState<PerfMetric>("both");
+
+  const periodStart = period === "daily" ? wibDayStart : wibWeekStart;
+
+  // Sorted list of period starts present in the data (most recent PERF_MAX_PERIODS).
+  const periods = useMemo(() => {
+    const set = new Set<number>();
+    for (const r of signals) {
+      if (r.outcome === "active") continue;
+      set.add(periodStart(r.bar_time));
+    }
+    return [...set].sort((a, b) => a - b).slice(-PERF_MAX_PERIODS);
+  }, [signals, period]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Overall: one stat row per period.
+  const overallRows = useMemo(() => {
+    return periods.map((p) => {
+      const rows = signals.filter((r) => r.outcome !== "active" && periodStart(r.bar_time) === p);
+      return { p, ...periodGroupStats(rows) };
+    });
+  }, [signals, periods]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Grouped: pivot bucket × period.
+  const grouped = useMemo(() => {
+    if (groupBy === "overall") return null;
+    const dim = CROSS_TAB_DIMS[groupBy];
+    const buckets = orderedBuckets(signals.filter((r) => r.outcome !== "active"), dim);
+    const cells = new Map<string, { n: number; winRate: number | null; expectancy: number | null }>();
+    for (const b of buckets) {
+      for (const p of periods) {
+        const rows = signals.filter((r) =>
+          r.outcome !== "active" && dim.bucketFor(r) === b && periodStart(r.bar_time) === p
+        );
+        cells.set(`${b}|${p}`, periodGroupStats(rows));
+      }
+    }
+    return { buckets, cells };
+  }, [signals, groupBy, periods]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const sel = "min-h-[36px] rounded-md border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-200 hover:border-neutral-500";
+
+  const cellText = (s: { n: number; winRate: number | null; expectancy: number | null }): string => {
+    if (s.n < PERF_MIN_N) return "—";
+    const wr = s.winRate !== null ? `${s.winRate}%` : "—";
+    const e = formatExpectancy(s.expectancy);
+    if (metric === "winRate") return wr;
+    if (metric === "expectancy") return e;
+    return `${wr} / ${e}`;
   };
 
   return (
     <div className="mb-4 rounded-md border border-neutral-800 bg-neutral-900/30 overflow-hidden">
-      <div className="px-3 py-2 text-xs uppercase tracking-wide text-neutral-500 border-b border-neutral-800">Performance over time (weekly)</div>
-      {weeks.length === 0 ? (
+      <div className="px-3 py-2 flex flex-wrap items-center gap-3 border-b border-neutral-800">
+        <span className="text-xs uppercase tracking-wide text-neutral-500">Performance over time</span>
+        <label className="text-[10px] uppercase tracking-wide text-neutral-500 flex items-center gap-1">
+          Period
+          <select className={sel} value={period} onChange={(e) => setPeriod(e.target.value as PerfPeriod)}>
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+          </select>
+        </label>
+        <label className="text-[10px] uppercase tracking-wide text-neutral-500 flex items-center gap-1">
+          Group by
+          <select className={sel} value={groupBy} onChange={(e) => setGroupBy(e.target.value as PerfGroupKey)}>
+            {PERF_GROUP_OPTIONS.map((o) => <option key={o.key} value={o.key}>{o.label}</option>)}
+          </select>
+        </label>
+        <label className="text-[10px] uppercase tracking-wide text-neutral-500 flex items-center gap-1">
+          Show as
+          <select className={sel} value={metric} onChange={(e) => setMetric(e.target.value as PerfMetric)}>
+            <option value="winRate">Win Rate</option>
+            <option value="expectancy">Expectancy</option>
+            <option value="both">Both</option>
+          </select>
+        </label>
+      </div>
+
+      {periods.length === 0 ? (
         <div className="px-3 py-6 text-center text-neutral-500 text-sm">No resolved signals yet.</div>
-      ) : (
+      ) : groupBy === "overall" ? (
         <div className="p-3 space-y-1.5">
-          {weeks.map((w) => {
+          {overallRows.map((w, i) => {
             const wr = w.winRate ?? 0;
-            const color = w.winRate === null ? "bg-neutral-700"
-              : w.winRate >= 55 ? "bg-emerald-500/70"
-              : w.winRate <= 35 ? "bg-red-500/70"
-              : "bg-neutral-500/70";
-            const small = w.n < 5; // de-emphasize thin samples
+            const byExp = metric !== "winRate";
+            const color = byExp
+              ? (w.expectancy === null ? "bg-neutral-700" : w.expectancy >= 0.30 ? "bg-emerald-500/70" : w.expectancy <= 0 ? "bg-red-500/70" : "bg-neutral-500/70")
+              : (w.winRate === null ? "bg-neutral-700" : w.winRate >= 55 ? "bg-emerald-500/70" : w.winRate <= 35 ? "bg-red-500/70" : "bg-neutral-500/70");
+            const small = w.n < PERF_MIN_N;
+            const isLatest = i === overallRows.length - 1;
             return (
-              <div key={w.wk} className={`flex items-center gap-2 text-xs ${small ? "opacity-50" : ""}`} title={`Week of ${fmtWeek(w.wk)} WIB · N=${w.n} · Win ${w.winRate ?? "—"}%`}>
-                <span className="w-12 shrink-0 tabular-nums text-neutral-500">{fmtWeek(w.wk)}</span>
+              <div key={w.p} className={`flex items-center gap-2 text-xs ${small ? "opacity-50" : ""}`} title={`${fmtPeriodLabel(w.p)} WIB · N=${w.n} · Win ${w.winRate ?? "—"}% · E ${formatExpectancy(w.expectancy)}`}>
+                <span className={`w-12 shrink-0 tabular-nums text-neutral-500 ${isLatest ? "font-bold text-neutral-300" : ""}`}>{fmtPeriodLabel(w.p)}</span>
                 <div className="flex-1 h-3 rounded bg-neutral-800 overflow-hidden">
                   <div className={`h-full ${color}`} style={{ width: `${wr}%` }} />
                 </div>
-                <span className="w-10 shrink-0 text-right tabular-nums text-neutral-300">{w.winRate !== null ? `${w.winRate}%` : "—"}</span>
+                {metric !== "expectancy" && (
+                  <span className="w-10 shrink-0 text-right tabular-nums text-neutral-300">{w.winRate !== null ? `${w.winRate}%` : "—"}</span>
+                )}
+                {metric !== "winRate" && (
+                  <span className={`w-14 shrink-0 text-right tabular-nums ${expectancyColor(w.expectancy)}`}>{formatExpectancy(w.expectancy)}</span>
+                )}
                 <span className="w-10 shrink-0 text-right tabular-nums text-neutral-600">N={w.n}</span>
               </div>
             );
           })}
         </div>
-      )}
+      ) : grouped ? (
+        <div className="overflow-x-auto">
+          <table className="text-xs">
+            <thead className="text-neutral-500 text-left">
+              <tr>
+                <th className="px-3 py-2 font-normal sticky left-0 bg-neutral-900/60">{CROSS_TAB_DIMS[groupBy].label}</th>
+                {periods.map((p, i) => (
+                  <th key={p} className={`px-3 py-2 font-normal text-center whitespace-nowrap ${i === periods.length - 1 ? "font-bold text-neutral-300" : ""}`}>
+                    {fmtPeriodLabel(p)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {grouped.buckets.map((b) => (
+                <tr key={b} className="border-t border-neutral-800">
+                  <td className="px-3 py-2 text-neutral-300 whitespace-nowrap sticky left-0 bg-neutral-900/60">{b}</td>
+                  {periods.map((p, i) => {
+                    const s = grouped.cells.get(`${b}|${p}`) ?? { n: 0, winRate: null, expectancy: null };
+                    const isLatest = i === periods.length - 1;
+                    const color = s.n < PERF_MIN_N ? "text-neutral-600" : expectancyColor(s.expectancy);
+                    return (
+                      <td key={p} className={`px-3 py-2 text-center tabular-nums whitespace-nowrap ${color} ${isLatest ? "font-bold" : ""}`}
+                        title={s.n >= PERF_MIN_N ? `${fmtPeriodLabel(p)} · ${b} · N=${s.n} · Win ${s.winRate ?? "—"}% · E ${formatExpectancy(s.expectancy)}` : `N=${s.n} (below ${PERF_MIN_N})`}>
+                        {cellText(s)}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : null}
     </div>
   );
 }
