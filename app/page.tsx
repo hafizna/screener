@@ -847,16 +847,10 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
   const { signals, stats } = history;
   const resolved = stats.tp3 + stats.tp2 + stats.tp1 + stats.sl + stats.expired;
 
-  const headlineExpectancy = useMemo(() => {
-    const rVals = signals
-      .filter((r) => r.outcome !== "active")
-      .map((r) => computeROutcome(r))
-      .filter((v): v is number => v !== null);
-    if (!rVals.length) return null;
-    const mean = rVals.reduce((a, b) => a + b, 0) / rVals.length;
-    const total = rVals.reduce((a, b) => a + b, 0);
-    return { mean, total };
-  }, [signals]);
+  // Plain computation (not a hook): this runs after the early returns above, so a
+  // useMemo here would violate the Rules of Hooks (hook count would change between
+  // the loading and loaded renders).
+  const headlineExpectancy = computeHeadlineExpectancy(signals);
 
   const filteredSignals = signals.filter((row) => {
     if (outcomeFilter === "running") {
@@ -1073,6 +1067,16 @@ function computeROutcome(row: SignalLog): number | null {
   if (!tpPrice) return null;
   const tpDist = row.side === "long" ? tpPrice - entry : entry - tpPrice;
   return tpDist / slDist;
+}
+
+function computeHeadlineExpectancy(signals: SignalLog[]): { mean: number; total: number } | null {
+  const rVals = signals
+    .filter((r) => r.outcome !== "active")
+    .map((r) => computeROutcome(r))
+    .filter((v): v is number => v !== null);
+  if (!rVals.length) return null;
+  const total = rVals.reduce((a, b) => a + b, 0);
+  return { mean: total / rVals.length, total };
 }
 
 function formatExpectancy(e: number | null): string {
