@@ -768,6 +768,18 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
 
   const { signals, stats } = history;
   const resolved = stats.tp3 + stats.tp2 + stats.tp1 + stats.sl + stats.expired;
+
+  const headlineExpectancy = useMemo(() => {
+    const rVals = signals
+      .filter((r) => r.outcome !== "active")
+      .map((r) => computeROutcome(r))
+      .filter((v): v is number => v !== null);
+    if (!rVals.length) return null;
+    const mean = rVals.reduce((a, b) => a + b, 0) / rVals.length;
+    const total = rVals.reduce((a, b) => a + b, 0);
+    return { mean, total };
+  }, [signals]);
+
   const filteredSignals = signals.filter((row) => {
     if (outcomeFilter === "running") {
       if (row.outcome !== "active") return false;
@@ -812,6 +824,13 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
             label="Win rate"
             value={stats.running > 0 ? `${stats.provisionalWinRate}% (${stats.winRate}% conf.)` : `${stats.winRate}%`}
             color="text-amber-300"
+          />
+        )}
+        {headlineExpectancy !== null && (
+          <StatPill
+            label="Expectancy"
+            value={`${formatExpectancy(headlineExpectancy.mean)} | Total ${headlineExpectancy.total >= 0 ? "+" : ""}${Math.round(headlineExpectancy.total)}R`}
+            color={expectancyColor(headlineExpectancy.mean)}
           />
         )}
       </div>
@@ -947,6 +966,37 @@ interface HistoryPerfRow {
   winRate: number;
   avgMfe: number | null;
   avgMae: number | null;
+  avgExpectancy: number | null;
+}
+
+// Compute R-multiple outcome for a single resolved trade.
+// Active and Expired are excluded (return null). SL = -1R, TPs = distance/risk.
+function computeROutcome(row: SignalLog): number | null {
+  if (row.outcome === "active" || row.outcome === "expired") return null;
+  const entry = row.entry_price;
+  const sl = row.sl;
+  if (!entry || !sl) return null;
+  const slDist = row.side === "long" ? entry - sl : sl - entry;
+  if (slDist <= 0) return null;
+  if (row.outcome === "sl") return -1.0;
+  const tpPrice = row.outcome === "tp1" ? row.tp1
+    : row.outcome === "tp2" ? row.tp2
+    : row.tp3; // tp3
+  if (!tpPrice) return null;
+  const tpDist = row.side === "long" ? tpPrice - entry : entry - tpPrice;
+  return tpDist / slDist;
+}
+
+function formatExpectancy(e: number | null): string {
+  if (e === null) return "—";
+  return `${e >= 0 ? "+" : ""}${e.toFixed(2)}R`;
+}
+
+function expectancyColor(e: number | null): string {
+  if (e === null) return "text-neutral-500";
+  if (e >= 0.30) return "text-emerald-300";
+  if (e <= 0) return "text-red-400";
+  return "text-neutral-200";
 }
 
 function historyConfidenceBucket(row: SignalLog): HistoryConfidenceFilter {
@@ -994,6 +1044,9 @@ function historyPerformanceRows(
     const maeVals = resolved
       .filter((row) => row.max_adverse !== null && row.entry_price)
       .map((row) => Math.abs(row.max_adverse!) / row.entry_price * 100);
+    const rVals = resolved
+      .map((row) => computeROutcome(row))
+      .filter((v): v is number => v !== null);
     return {
       label,
       total: group.length,
@@ -1003,6 +1056,7 @@ function historyPerformanceRows(
       winRate: resolved.length ? Math.round(wins / resolved.length * 100) : 0,
       avgMfe: mfeVals.length ? mfeVals.reduce((a, b) => a + b, 0) / mfeVals.length : null,
       avgMae: maeVals.length ? maeVals.reduce((a, b) => a + b, 0) / maeVals.length : null,
+      avgExpectancy: rVals.length ? rVals.reduce((a, b) => a + b, 0) / rVals.length : null,
     };
   }).sort((a, b) => b.total - a.total);
 }
@@ -1034,7 +1088,7 @@ function csvField(v: string | number | null): string {
 function downloadHistoryCsv(signals: SignalLog[]): void {
   const headers = [
     "timestamp_wib", "symbol", "side", "regime", "type", "confidence", "sqz_bucket",
-    "profile", "tp_magnet", "entry", "sl", "tp1", "tp2", "tp3", "outcome",
+    "profile", "tp_magnet", "entry", "sl", "tp1", "tp2", "tp3", "outcome", "r_outcome",
     "duration_minutes", "mfe_pct", "mae_pct", "time_of_day_session",
   ];
   const num2 = (n: number) => Number(n.toFixed(2)); // dot decimal, no thousand separators
@@ -1043,6 +1097,7 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
     const durationMin = endMs !== null ? Math.round((endMs - r.bar_time) / 60_000) : null;
     const mfe = r.max_favorable !== null && r.entry_price ? num2(Math.abs(r.max_favorable) / r.entry_price * 100) : null;
     const mae = r.max_adverse !== null && r.entry_price ? num2(Math.abs(r.max_adverse) / r.entry_price * 100) : null;
+    const rOutcome = computeROutcome(r);
     return [
       wibTimestamp(r.bar_time),
       r.symbol,
@@ -1059,6 +1114,7 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
       r.tp2,
       r.tp3,
       r.outcome,
+      rOutcome !== null ? Number(rOutcome.toFixed(3)) : null,
       durationMin,
       mfe,
       mae,
@@ -1127,10 +1183,11 @@ interface CrossCell {
   expired: number;
   mfeSum: number; mfeN: number;
   maeSum: number; maeN: number;
+  rSum: number; rN: number;
 }
 
 function emptyCell(): CrossCell {
-  return { wins: 0, losses: 0, expired: 0, mfeSum: 0, mfeN: 0, maeSum: 0, maeN: 0 };
+  return { wins: 0, losses: 0, expired: 0, mfeSum: 0, mfeN: 0, maeSum: 0, maeN: 0, rSum: 0, rN: 0 };
 }
 
 function addToCell(cell: CrossCell, row: SignalLog): void {
@@ -1140,6 +1197,8 @@ function addToCell(cell: CrossCell, row: SignalLog): void {
   else cell.wins++; // tp1 / tp2 / tp3
   if (row.max_favorable !== null && row.entry_price) { cell.mfeSum += Math.abs(row.max_favorable) / row.entry_price * 100; cell.mfeN++; }
   if (row.max_adverse !== null && row.entry_price)   { cell.maeSum += Math.abs(row.max_adverse)   / row.entry_price * 100; cell.maeN++; }
+  const r = computeROutcome(row);
+  if (r !== null) { cell.rSum += r; cell.rN++; }
 }
 
 function cellN(c: CrossCell): number { return c.wins + c.losses + c.expired; }
@@ -1158,12 +1217,20 @@ const CROSS_TAB_MIN_N = 5;
 
 function cellAvgMfe(c: CrossCell): number | null { return c.mfeN ? c.mfeSum / c.mfeN : null; }
 function cellAvgMae(c: CrossCell): number | null { return c.maeN ? c.maeSum / c.maeN : null; }
+function cellExpectancy(c: CrossCell): number | null { return c.rN ? c.rSum / c.rN : null; }
 
 function cellBgStyle(c: CrossCell): React.CSSProperties | undefined {
+  if (cellN(c) < CROSS_TAB_MIN_N) return undefined;
+  const e = cellExpectancy(c);
+  if (e !== null) {
+    if (e >= 0.50) return { backgroundColor: "rgba(34, 197, 94, 0.15)" };
+    if (e <= 0) return { backgroundColor: "rgba(239, 68, 68, 0.15)" };
+    return undefined;
+  }
   const wr = cellWinRate(c);
-  if (cellN(c) < CROSS_TAB_MIN_N || wr === null) return undefined;
-  if (wr >= 55) return { backgroundColor: "rgba(34, 197, 94, 0.15)" };  // green
-  if (wr <= 35) return { backgroundColor: "rgba(239, 68, 68, 0.15)" };  // red
+  if (wr === null) return undefined;
+  if (wr >= 55) return { backgroundColor: "rgba(34, 197, 94, 0.15)" };
+  if (wr <= 35) return { backgroundColor: "rgba(239, 68, 68, 0.15)" };
   return undefined;
 }
 
@@ -1171,9 +1238,11 @@ function cellTooltip(c: CrossCell): string | undefined {
   const n = cellN(c);
   if (n === 0) return undefined;
   const wr = cellWinRate(c);
+  const e = cellExpectancy(c);
   const mfe = cellAvgMfe(c);
   const mae = cellAvgMae(c);
-  return `N=${n} | Win ${wr}% | ${c.wins}W ${c.losses}L ${c.expired}Exp | Avg MFE ${mfe !== null ? mfe.toFixed(2) : "—"}% | Avg MAE ${mae !== null ? mae.toFixed(2) : "—"}%`;
+  const eStr = e !== null ? `${e >= 0 ? "+" : ""}${e.toFixed(2)}R` : "—";
+  return `N=${n} | Win ${wr}% | E ${eStr} | MFE ${mfe !== null ? mfe.toFixed(2) : "—"}% | MAE ${mae !== null ? mae.toFixed(2) : "—"}%`;
 }
 
 // Weekly win-rate trend so you can see whether the model is improving, decaying, or
@@ -1375,10 +1444,17 @@ function CrossTab({ signals }: { signals: SignalLog[] }) {
     const n = cellN(c);
     const wr = cellWinRate(c);
     if (n < CROSS_TAB_MIN_N || wr === null) return <span className="text-neutral-600">—</span>;
+    const e = cellExpectancy(c);
+    const eColor = e !== null && e >= 0.50 ? "text-emerald-400"
+      : e !== null && e <= 0 ? "text-red-400"
+      : "text-neutral-500";
     return (
       <div className="leading-tight">
         <div className="text-neutral-400 text-xs">N={n}</div>
         <div className="tabular-nums text-neutral-200">{wr}%</div>
+        {e !== null && (
+          <div className={`tabular-nums text-xs ${eColor}`}>{e >= 0 ? "+" : ""}{e.toFixed(2)}R</div>
+        )}
       </div>
     );
   };
@@ -1527,6 +1603,7 @@ function HistoryBreakdown({ title, rows }: { title: string; rows: HistoryPerfRow
             <th className="px-3 py-2 font-normal">Bucket</th>
             <th className="px-2 py-2 font-normal text-right">N</th>
             <th className="px-2 py-2 font-normal text-right">Win</th>
+            <th className="px-2 py-2 font-normal text-right">Exp</th>
             <th className="px-2 py-2 font-normal text-right">MFE</th>
             <th className="px-3 py-2 font-normal text-right">MAE</th>
           </tr>
@@ -1537,6 +1614,7 @@ function HistoryBreakdown({ title, rows }: { title: string; rows: HistoryPerfRow
               <td className="px-3 py-2 text-neutral-300">{row.label}</td>
               <td className="px-2 py-2 text-right tabular-nums text-neutral-400">{row.total}</td>
               <td className="px-2 py-2 text-right tabular-nums text-emerald-300">{row.resolved ? `${row.winRate}%` : "-"}</td>
+              <td className={`px-2 py-2 text-right tabular-nums ${expectancyColor(row.avgExpectancy)}`}>{formatExpectancy(row.avgExpectancy)}</td>
               <td className="px-2 py-2 text-right tabular-nums text-emerald-400">{row.avgMfe !== null ? `${row.avgMfe.toFixed(2)}%` : "-"}</td>
               <td className="px-3 py-2 text-right tabular-nums text-red-400">{row.avgMae !== null ? `${row.avgMae.toFixed(2)}%` : "-"}</td>
             </tr>
