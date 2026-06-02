@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getTrackedSignals, getRadarCandidates, getRecentResolved, getSignalTraceSnapshots } from "@/lib/db";
+import { ensureSchema, getTrackedSignals, getRadarCandidates, getRecentResolved, getSignalTraceSnapshots } from "@/lib/db";
 import { fetchMarkPrices } from "@/lib/binance";
 
 export const dynamic = "force-dynamic";
@@ -9,6 +9,12 @@ export const dynamic = "force-dynamic";
 // the current mark price attached so the client can compute live state / P&L.
 export async function GET() {
   try {
+    // The board reads tables (e.g. signal_trace_snapshots) that are created by
+    // ensureSchema. The cron scan also calls it, but the board can be hit before
+    // the first post-deploy scan runs, so ensure the schema here too — it's a
+    // no-op when the DB is unconfigured and idempotent otherwise.
+    await ensureSchema();
+
     const since = Date.now() - 3 * 60 * 60_000; // radar freshness window: 3h
     const [radar, tracked, resolved, prices] = await Promise.all([
       getRadarCandidates(since),
