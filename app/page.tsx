@@ -794,6 +794,8 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
   const profileRows = historyPerformanceRows(signals, historyProfileBucket);
   // TP2 magnet source — lets us compare VWAP-anchored vs pure-ATR target performance.
   const tpSourceRows = historyPerformanceRows(signals, historyTpMagnetBucket);
+  // EX multiplier (volume z-score) — already persisted at fire time, just bucketed here.
+  const exRows = historyPerformanceRows(signals, historyExBucket);
 
   // New breakdown cards respect the confidence filter so they reflect the filtered subset.
   const confidenceSignals = confidenceFilter === "all"
@@ -854,6 +856,7 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
         <HistoryBreakdown title="SQZ" rows={squeezeRows} />
         <HistoryBreakdown title="Profile" rows={profileRows} />
         <HistoryBreakdown title="TP magnet" rows={tpSourceRows} />
+        <HistoryBreakdown title="EX multiplier" rows={exRows} />
         <HistoryBreakdown title="Time of day" rows={timeOfDayRows} />
         <HistoryBreakdown title="Side" rows={sideRows} />
         <HistoryBreakdown title="Regime" rows={regimeRows} />
@@ -1088,7 +1091,7 @@ function csvField(v: string | number | null): string {
 function downloadHistoryCsv(signals: SignalLog[]): void {
   const headers = [
     "timestamp_wib", "symbol", "side", "regime", "type", "confidence", "sqz_bucket",
-    "profile", "tp_magnet", "entry", "sl", "tp1", "tp2", "tp3", "outcome", "r_outcome",
+    "ex_value", "profile", "tp_magnet", "entry", "sl", "tp1", "tp2", "tp3", "outcome", "r_outcome",
     "duration_minutes", "mfe_pct", "mae_pct", "time_of_day_session",
   ];
   const num2 = (n: number) => Number(n.toFixed(2)); // dot decimal, no thousand separators
@@ -1106,6 +1109,7 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
       r.signal_type ?? "",
       historyConfidenceBucket(r),
       historySqueezeBucket(r),
+      num2(r.z_score),
       historyProfileBucket(r),
       historyTpMagnetBucket(r),
       r.entry_price,
@@ -1134,6 +1138,16 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
   URL.revokeObjectURL(url);
 }
 
+// EX multiplier = volume z-score, the "EX/LG" badge value snapshotted at fire time
+// (z_score column, already persisted by insertSignal). Higher = more extreme volume spike.
+function historyExBucket(row: SignalLog): string {
+  const z = row.z_score;
+  if (z < 1.5) return "0-1.5";
+  if (z < 2.5) return "1.5-2.5";
+  if (z < 3.5) return "2.5-3.5";
+  return "3.5+";
+}
+
 function historyTpMagnetBucket(row: SignalLog): string {
   return row.tp2_source === "vwap_daily" ? "TP2 daily VWAP"
     : row.tp2_source === "vwap_weekly" ? "TP2 weekly VWAP"
@@ -1143,7 +1157,7 @@ function historyTpMagnetBucket(row: SignalLog): string {
 // ─── Cross-tab analysis ───────────────────────────────────────────────────────
 // Pivot any two breakdown dimensions against each other. Bucket functions are
 // reused from the breakdown cards so a signal lands in the same bucket here.
-type CrossTabDimKey = "confidence" | "sqz" | "profile" | "tpMagnet" | "timeOfDay" | "side" | "regime" | "signalType" | "bias1h" | "bias4h" | "frBias" | "oiBias" | "lsBias" | "rsBias" | "deltaBias";
+type CrossTabDimKey = "confidence" | "sqz" | "ex" | "profile" | "tpMagnet" | "timeOfDay" | "side" | "regime" | "signalType" | "bias1h" | "bias4h" | "frBias" | "oiBias" | "lsBias" | "rsBias" | "deltaBias";
 
 interface CrossTabDim {
   label: string;
@@ -1152,11 +1166,12 @@ interface CrossTabDim {
 }
 
 // Dropdown order (and labels) per spec.
-const CROSS_TAB_DIM_ORDER: CrossTabDimKey[] = ["confidence", "sqz", "profile", "tpMagnet", "timeOfDay", "side", "regime", "signalType", "bias1h", "bias4h", "frBias", "oiBias", "lsBias", "rsBias", "deltaBias"];
+const CROSS_TAB_DIM_ORDER: CrossTabDimKey[] = ["confidence", "sqz", "ex", "profile", "tpMagnet", "timeOfDay", "side", "regime", "signalType", "bias1h", "bias4h", "frBias", "oiBias", "lsBias", "rsBias", "deltaBias"];
 
 const CROSS_TAB_DIMS: Record<CrossTabDimKey, CrossTabDim> = {
   confidence: { label: "Confidence", bucketFor: historyConfidenceBucket, order: ["high", "medium", "low"] },
   sqz:        { label: "SQZ", bucketFor: historySqueezeBucket, order: ["0", "1-2", "3-4", "5-6"] },
+  ex:         { label: "EX Multiplier", bucketFor: historyExBucket, order: ["0-1.5", "1.5-2.5", "2.5-3.5", "3.5+"] },
   // Real trigger_level values: POC, VAL, VAH, PREV_POC, PREV_VAL, PREV_VAH.
   profile:    { label: "Profile", bucketFor: historyProfileBucket, order: ["VAH", "VAL", "POC", "PREV_VAH", "PREV_VAL", "PREV_POC"] },
   tpMagnet:   { label: "TP Magnet", bucketFor: historyTpMagnetBucket, order: ["TP2 pure ATR", "TP2 weekly VWAP", "TP2 daily VWAP"] },
