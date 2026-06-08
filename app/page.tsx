@@ -239,14 +239,27 @@ function LifecycleBoard({
 }) {
   const sideOk = (s: "long" | "short") => sideFilter === "all" || s === sideFilter;
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
+  const [qualityFilter, setQualityFilter] = useState(false);
 
-  const radar = (board?.radar ?? []).filter((r) => sideOk(r.side));
+  // Quality filter: drop the three statistically weak categories identified in analysis.
+  // Always keeps entered trades visible regardless of category.
+  const passesQuality = (t: BoardTrade): boolean => {
+    if (t.user_action === "enter") return true;
+    if (historySqueezeBucket(t) === "0" || historySqueezeBucket(t) === "none") return false;
+    if (t.signal_type === "bounce") return false;
+    if (historyConfidenceBucket(t) === "high" && t.regime === "breakout") return false;
+    return true;
+  };
+
+  const radar = (board?.radar ?? []).filter((r) =>
+    sideOk(r.side) && (!qualityFilter || (r.squeeze_score != null && r.squeeze_score >= 1))
+  );
   const tracked = (board?.tracked ?? []).filter((t) => sideOk(t.side));
   const resolvedAll = (board?.resolved ?? []).filter((t) => sideOk(t.side));
 
   // Fired = active, no TP yet. Running = active, already hit ≥ TP1.
-  const fired = tracked.filter((t) => t.outcome === "active" && t.best_tp == null);
-  const running = tracked.filter((t) => t.outcome === "active" && t.best_tp != null);
+  const fired = tracked.filter((t) => t.outcome === "active" && t.best_tp == null && (!qualityFilter || passesQuality(t)));
+  const running = tracked.filter((t) => t.outcome === "active" && t.best_tp != null && (!qualityFilter || passesQuality(t)));
   // A tracked row can also be resolved-but-starred; fold those into resolved.
   const resolvedFromTracked = tracked.filter((t) => t.outcome !== "active");
   const resolvedIds = new Set(resolvedFromTracked.map((r) => r.id));
@@ -299,6 +312,17 @@ function LifecycleBoard({
             <Chip key={s} active={sideFilter === s} onClick={() => setSideFilter(s)}>{s}</Chip>
           ))}
         </FilterGroup>
+        <button
+          onClick={() => setQualityFilter((v) => !v)}
+          title="Hide sqz=0, bounce type, and high-conf breakout signals (low-EV categories per analysis)"
+          className={`px-2.5 py-1 text-xs rounded-md transition-colors border ${
+            qualityFilter
+              ? "bg-amber-500/20 border-amber-600/60 text-amber-300"
+              : "bg-neutral-900 border-neutral-800 text-neutral-400 hover:border-neutral-700"
+          }`}
+        >
+          {qualityFilter ? "Quality ✕" : "Quality filter"}
+        </button>
         <span className="ml-auto text-xs text-neutral-600">
           radar→fired→running→trace · resolved lives in History · auto-refresh 60s
         </span>
