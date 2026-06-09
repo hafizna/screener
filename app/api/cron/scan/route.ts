@@ -11,6 +11,7 @@ import { detectBTCRegime } from "@/lib/regime";
 import { computeATR, computeRS, computeSqueezeScore } from "@/lib/atr";
 import type { BiasWindow, FRBias, LsBias, MarketRegime, Signal, SignalType, ScanResult, WatchCandidate } from "@/lib/types";
 import { analyzeBias } from "@/lib/bias";
+import { classifyFR, classifyLs } from "@/lib/funding";
 import { detectRecentSignals, detectWatchCandidate } from "@/lib/signals";
 import { dailyVwap, weeklyVwap } from "@/lib/vwap";
 import { computeTargets } from "@/lib/targets";
@@ -134,9 +135,7 @@ export async function GET(req: NextRequest) {
     // L/S ratio
     const longShortRatio = lsData?.longShortRatio;
     const lsBias: LsBias | undefined = longShortRatio !== undefined
-      ? longShortRatio < 0.85 ? "crowded_shorts"
-      : longShortRatio > 1.20 ? "crowded_longs"
-      : "balanced"
+      ? classifyLs(longShortRatio)
       : undefined;
 
     // Signal type — what kind of setup is this given the regime?
@@ -585,25 +584,6 @@ function passesBiasConfirmation(
   return Math.abs(bias4h.score) >= 3 && Math.abs(bias1h.score) <= 1;
 }
 
-// FR classification is regime-aware.
-// In a FLUSH for longs: high positive FR = shorts overcrowded at support = squeeze fuel → FAVORABLE.
-// In all other cases: standard logic.
-function classifyFR(side: "long" | "short", fr: number, regime: MarketRegime): FRBias {
-  if (regime === "flush" && side === "long") {
-    if (fr > 0.0005) return "favorable";  // > +0.05%: shorts are paying, crowded
-    if (fr < 0)      return "neutral";    // negative FR in flush = unusual
-    return "neutral";
-  }
-  if (side === "long") {
-    if (fr < 0)    return "favorable";
-    if (fr > 0.001) return "unfavorable"; // > +0.10%: longs crowded in normal market
-    return "neutral";
-  }
-  // short
-  if (fr > 0.0005) return "favorable";
-  if (fr < 0)      return "unfavorable";
-  return "neutral";
-}
 
 function determineSignalType(
   side: "long" | "short",
