@@ -11,6 +11,7 @@ import { detectBTCRegime } from "@/lib/regime";
 import { computeATR, computeRS, computeSqueezeScore } from "@/lib/atr";
 import type { BiasWindow, FRBias, LsBias, MarketRegime, Signal, SignalType, ScanResult, WatchCandidate } from "@/lib/types";
 import { analyzeBias } from "@/lib/bias";
+import { classifyFR, classifyLs } from "@/lib/funding";
 import { detectRecentSignals, detectWatchCandidate } from "@/lib/signals";
 import { dailyVwap, weeklyVwap } from "@/lib/vwap";
 import { computeTargets } from "@/lib/targets";
@@ -134,9 +135,7 @@ export async function GET(req: NextRequest) {
     // L/S ratio
     const longShortRatio = lsData?.longShortRatio;
     const lsBias: LsBias | undefined = longShortRatio !== undefined
-      ? longShortRatio < 0.85 ? "crowded_shorts"
-      : longShortRatio > 1.20 ? "crowded_longs"
-      : "balanced"
+      ? classifyLs(longShortRatio)
       : undefined;
 
     // Signal type — what kind of setup is this given the regime?
@@ -165,7 +164,7 @@ export async function GET(req: NextRequest) {
 
     // Squeeze Potential Score (0–6)
     const enrichedSignals = allRecentSignals
-      .filter((signal) => passesBiasConfirmation(signal, bias1h, bias4h, regime))
+      .filter((signal) => passesBiasConfirmation(signal, bias1h, bias4h))
       .map((signal) => {
         const frBias = frInfo !== undefined
           ? classifyFR(signal.side, frInfo.lastFundingRate, regime)
@@ -445,8 +444,6 @@ export async function GET(req: NextRequest) {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-// In FLUSH regime, long signals with bearish HTF are contrarian bounces — don't block them.
-// Shorts confirmed normally; so do all non-flush signals.
 type Bias = ReturnType<typeof analyzeBias>;
 
 function enrichWatchCandidate(
@@ -573,38 +570,20 @@ function estimateBiasWindow(
   return "1-2d";
 }
 
+// Flush-regime longs used to bypass HTF confirmation as "contrarian bounces",
+// but 13 days of outcomes priced that bucket at -0.32R executable (n=262) —
+// the worst slice in the log. Flush longs now confirm like everything else.
 function passesBiasConfirmation(
   signal: Signal,
   bias1h: Bias,
-  bias4h: Bias,
-  regime: MarketRegime
+  bias4h: Bias
 ): boolean {
-  if (regime === "flush" && signal.side === "long") return true;
   const opposite = signal.side === "long" ? "short" : "long";
   if (bias4h.bias === opposite || bias1h.bias === opposite) return false;
   if (bias4h.bias === signal.side || bias1h.bias === signal.side) return true;
   return Math.abs(bias4h.score) >= 3 && Math.abs(bias1h.score) <= 1;
 }
 
-// FR classification is regime-aware.
-// In a FLUSH for longs: high positive FR = shorts overcrowded at support = squeeze fuel → FAVORABLE.
-// In all other cases: standard logic.
-function classifyFR(side: "long" | "short", fr: number, regime: MarketRegime): FRBias {
-  if (regime === "flush" && side === "long") {
-    if (fr > 0.0005) return "favorable";  // > +0.05%: shorts are paying, crowded
-    if (fr < 0)      return "neutral";    // negative FR in flush = unusual
-    return "neutral";
-  }
-  if (side === "long") {
-    if (fr < 0)    return "favorable";
-    if (fr > 0.001) return "unfavorable"; // > +0.10%: longs crowded in normal market
-    return "neutral";
-  }
-  // short
-  if (fr > 0.0005) return "favorable";
-  if (fr < 0)      return "unfavorable";
-  return "neutral";
-}
 
 function determineSignalType(
   side: "long" | "short",

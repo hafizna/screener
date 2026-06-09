@@ -33,10 +33,13 @@ export interface FetchKlinesError extends Error {
 export async function fetchKlines(
   symbol: string,
   timeframe: Timeframe,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  opts?: { endTime?: number; limit?: number }
 ): Promise<Kline[]> {
   const interval = TIMEFRAME_TO_INTERVAL[timeframe];
-  const url = `${FAPI_BASE}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${BARS_PER_FETCH}`;
+  const limit = opts?.limit ?? BARS_PER_FETCH;
+  const endTime = opts?.endTime !== undefined ? `&endTime=${opts.endTime}` : "";
+  const url = `${FAPI_BASE}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&limit=${limit}${endTime}`;
 
   let res: Response;
   try {
@@ -232,6 +235,53 @@ export async function fetchMarkPrices(): Promise<Map<string, number>> {
     if (isFinite(price) && price > 0) map.set(d.symbol, price);
   }
   return map;
+}
+
+// ─── Historical lookups (backfill) ───────────────────────────────────────────
+// These mirror the live-scan data sources but accept a point in time, so rows
+// logged before an enrichment column existed can be filled retroactively.
+
+// Settled funding rate closest before `atMs` (events every 8h, full history).
+// Approximates the predicted rate the scan would have seen at that moment.
+export async function fetchFundingRateAt(symbol: string, atMs: number): Promise<number | null> {
+  const start = atMs - 9 * 60 * 60 * 1000; // covers at least one 8h funding event
+  const url = `${FAPI_BASE}/fapi/v1/fundingRate?symbol=${symbol}&startTime=${start}&endTime=${atMs}&limit=5`;
+  let res: Response;
+  try { res = await fetch(url, { cache: "no-store" }); } catch { return null; }
+  if (!res.ok) return null;
+  const data = (await res.json()) as Array<{ fundingRate: string; fundingTime: number }>;
+  if (!data.length) return null;
+  const fr = parseFloat(data[data.length - 1].fundingRate);
+  return isFinite(fr) ? fr : null;
+}
+
+// Global long/short account ratio at `atMs` (5m granularity). Binance only
+// retains ~30 days of history — older lookups return null.
+export async function fetchLongShortRatioAt(symbol: string, atMs: number): Promise<number | null> {
+  const url = `${FAPI_BASE}/futures/data/globalLongShortAccountRatio?symbol=${symbol}&period=5m&startTime=${atMs}&endTime=${atMs + 10 * 60 * 1000}&limit=2`;
+  let res: Response;
+  try { res = await fetch(url, { cache: "no-store" }); } catch { return null; }
+  if (!res.ok) return null;
+  const data = (await res.json()) as Array<{ longShortRatio: string }>;
+  if (!data.length) return null;
+  const ratio = parseFloat(data[0].longShortRatio);
+  return isFinite(ratio) ? ratio : null;
+}
+
+// OI history window ending at the signal bar's close (15m granularity, ~30 days
+// retention). Matches the live scan's 4-point lookback.
+export async function fetchOIHistoryAt(symbol: string, barTimeMs: number, points = 4): Promise<OISnapshot[]> {
+  const start = barTimeMs - (points - 1) * 15 * 60 * 1000;
+  const end = barTimeMs + 15 * 60 * 1000;
+  const url = `${FAPI_BASE}/futures/data/openInterestHist?symbol=${symbol}&period=15m&startTime=${start}&endTime=${end}&limit=${points + 2}`;
+  let res: Response;
+  try { res = await fetch(url, { cache: "no-store" }); } catch { return []; }
+  if (!res.ok) return [];
+  const data = (await res.json()) as Array<{ sumOpenInterest: string; timestamp: number }>;
+  return data
+    .map((d) => ({ openInterest: parseFloat(d.sumOpenInterest), timestamp: d.timestamp }))
+    .filter((d) => isFinite(d.openInterest))
+    .slice(-points);
 }
 
 // Run a list of async tasks with bounded concurrency.

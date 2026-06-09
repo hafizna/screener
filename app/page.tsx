@@ -864,6 +864,7 @@ function RunningBadge({ bestTP }: { bestTP: string | null }) {
 function HistoryTab({ history, loading, err }: { history: HistoryResult | null; loading: boolean; err: string | null }) {
   const [outcomeFilter, setOutcomeFilter] = useState<HistoryFilter>("all");
   const [confidenceFilter, setConfidenceFilter] = useState<HistoryConfidenceFilter>("all");
+  const [rBasis, setRBasis] = useState<RBasis>("exec");
   if (loading) return <div className="text-neutral-500 text-sm py-12 text-center">Loading signal history…</div>;
   if (err)     return <div className="text-red-400 text-sm py-4">Error: {err}</div>;
   if (!history) return null;
@@ -874,7 +875,8 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
   // Plain computation (not a hook): this runs after the early returns above, so a
   // useMemo here would violate the Rules of Hooks (hook count would change between
   // the loading and loaded renders).
-  const headlineExpectancy = computeHeadlineExpectancy(signals);
+  const execExpectancy = computeHeadlineExpectancy(signals, "exec");
+  const bestTpExpectancy = computeHeadlineExpectancy(signals, "bestTp");
 
   const filteredSignals = signals.filter((row) => {
     if (outcomeFilter === "running") {
@@ -885,25 +887,25 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
     if (confidenceFilter !== "all" && historyConfidenceBucket(row) !== confidenceFilter) return false;
     return true;
   });
-  const confidenceRows = historyPerformanceRows(signals, historyConfidenceBucket);
-  const squeezeRows = historyPerformanceRows(signals, historySqueezeBucket);
-  const profileRows = historyPerformanceRows(signals, historyProfileBucket);
+  const confidenceRows = historyPerformanceRows(signals, historyConfidenceBucket, rBasis);
+  const squeezeRows = historyPerformanceRows(signals, historySqueezeBucket, rBasis);
+  const profileRows = historyPerformanceRows(signals, historyProfileBucket, rBasis);
   // TP2 magnet source — lets us compare VWAP-anchored vs pure-ATR target performance.
-  const tpSourceRows = historyPerformanceRows(signals, historyTpMagnetBucket);
+  const tpSourceRows = historyPerformanceRows(signals, historyTpMagnetBucket, rBasis);
   // EX multiplier (volume z-score) — already persisted at fire time, just bucketed here.
-  const exRows = historyPerformanceRows(signals, historyExBucket);
+  const exRows = historyPerformanceRows(signals, historyExBucket, rBasis);
 
   // New breakdown cards respect the confidence filter so they reflect the filtered subset.
   const confidenceSignals = confidenceFilter === "all"
     ? signals
     : signals.filter((r) => historyConfidenceBucket(r) === confidenceFilter);
-  const timeOfDayRows = historyPerformanceRows(confidenceSignals, historyTimeOfDayBucket);
-  const sideRows      = historyPerformanceRows(confidenceSignals, (row) => row.side);
-  const regimeRows    = historyPerformanceRows(confidenceSignals, (row) => row.regime ?? "unknown");
+  const timeOfDayRows = historyPerformanceRows(confidenceSignals, historyTimeOfDayBucket, rBasis);
+  const sideRows      = historyPerformanceRows(confidenceSignals, (row) => row.side, rBasis);
+  const regimeRows    = historyPerformanceRows(confidenceSignals, (row) => row.regime ?? "unknown", rBasis);
   // BTC context cards (snapshotted at fire time; respect the confidence filter).
-  const btc15mRows  = historyPerformanceRows(confidenceSignals, historyBtc15mBucket);
-  const btc1hRows   = historyPerformanceRows(confidenceSignals, historyBtc1hBucket);
-  const btcVolRows  = historyPerformanceRows(confidenceSignals, historyBtcVolBucket);
+  const btc15mRows  = historyPerformanceRows(confidenceSignals, historyBtc15mBucket, rBasis);
+  const btc1hRows   = historyPerformanceRows(confidenceSignals, historyBtc1hBucket, rBasis);
+  const btcVolRows  = historyPerformanceRows(confidenceSignals, historyBtcVolBucket, rBasis);
 
   const RENDER_CAP = 500;
   const visibleSignals = filteredSignals.slice(0, RENDER_CAP);
@@ -928,11 +930,18 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
             color="text-amber-300"
           />
         )}
-        {headlineExpectancy !== null && (
+        {execExpectancy !== null && (
           <StatPill
-            label="Expectancy"
-            value={`${formatExpectancy(headlineExpectancy.mean)} | Total ${headlineExpectancy.total >= 0 ? "+" : ""}${Math.round(headlineExpectancy.total)}R`}
-            color={expectancyColor(headlineExpectancy.mean)}
+            label="Exec expectancy"
+            value={`${formatExpectancy(execExpectancy.mean)} | Total ${execExpectancy.total >= 0 ? "+" : ""}${Math.round(execExpectancy.total)}R`}
+            color={expectancyColor(execExpectancy.mean)}
+          />
+        )}
+        {bestTpExpectancy !== null && (
+          <StatPill
+            label="Best-TP exp"
+            value={`${formatExpectancy(bestTpExpectancy.mean)} | Total ${bestTpExpectancy.total >= 0 ? "+" : ""}${Math.round(bestTpExpectancy.total)}R`}
+            color="text-neutral-400"
           />
         )}
       </div>
@@ -944,6 +953,10 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
               {bucket}
             </Chip>
           ))}
+        </FilterGroup>
+        <FilterGroup label="R basis">
+          <Chip active={rBasis === "exec"} onClick={() => setRBasis("exec")}>executable</Chip>
+          <Chip active={rBasis === "bestTp"} onClick={() => setRBasis("bestTp")}>best TP</Chip>
         </FilterGroup>
         <div className="ml-auto text-sm text-neutral-400">
           {filteredSignals.length} row{filteredSignals.length === 1 ? "" : "s"}
@@ -967,9 +980,9 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
 
       <SelectionEdgePanel signals={signals} />
 
-      <PerformanceOverTime signals={confidenceSignals} />
+      <PerformanceOverTime signals={confidenceSignals} rBasis={rBasis} />
 
-      <CrossTab signals={confidenceSignals} />
+      <CrossTab signals={confidenceSignals} rBasis={rBasis} />
 
       {filteredSignals.length === 0 ? (
         <div className="rounded-md border border-neutral-800 bg-neutral-900/40 p-8 text-center text-neutral-500 text-sm">
@@ -1075,9 +1088,28 @@ interface HistoryPerfRow {
   avgExpectancy: number | null;
 }
 
-// Compute R-multiple outcome for a single resolved trade.
-// Active and Expired are excluded (return null). SL = -1R, TPs = distance/risk.
-function computeROutcome(row: SignalLog): number | null {
+// R accounting basis:
+//  - "exec": the exit the trailing-SL state machine actually produces — outcome
+//    "tp1" means TP1 was touched and the trade then exited at break-even (0R),
+//    "tp2" exited at TP1, "tp3" at TP3. This is the realizable equity curve.
+//  - "bestTp": credits the full distance to the best TP touched. Measures the
+//    quality of the level, but overstates what any single-exit execution earns.
+type RBasis = "exec" | "bestTp";
+
+// Exit price the trailing-SL state machine produces for a resolved trade
+// (mirrors resolveOutcome in lib/outcomes.ts; matches outcome_price for
+// rows written since that column existed).
+function execExitPrice(row: SignalLog): number | null {
+  if (row.outcome === "sl") return row.sl;
+  if (row.outcome === "tp1") return row.entry_price;  // trailed to break-even
+  if (row.outcome === "tp2") return row.tp1;          // trailed to TP1
+  if (row.outcome === "tp3") return row.tp3;
+  return null;
+}
+
+// Compute R-multiple outcome for a single resolved trade on the given basis.
+// Active and Expired are excluded (return null). SL = -1R.
+function computeROutcome(row: SignalLog, basis: RBasis): number | null {
   if (row.outcome === "active" || row.outcome === "expired") return null;
   const entry = row.entry_price;
   const sl = row.sl;
@@ -1085,18 +1117,20 @@ function computeROutcome(row: SignalLog): number | null {
   const slDist = row.side === "long" ? entry - sl : sl - entry;
   if (slDist <= 0) return null;
   if (row.outcome === "sl") return -1.0;
-  const tpPrice = row.outcome === "tp1" ? row.tp1
-    : row.outcome === "tp2" ? row.tp2
-    : row.tp3; // tp3
-  if (!tpPrice) return null;
-  const tpDist = row.side === "long" ? tpPrice - entry : entry - tpPrice;
-  return tpDist / slDist;
+  const exitPrice = basis === "exec"
+    ? execExitPrice(row)
+    : row.outcome === "tp1" ? row.tp1
+      : row.outcome === "tp2" ? row.tp2
+      : row.tp3; // tp3
+  if (!exitPrice) return null;
+  const exitDist = row.side === "long" ? exitPrice - entry : entry - exitPrice;
+  return exitDist / slDist;
 }
 
-function computeHeadlineExpectancy(signals: SignalLog[]): { mean: number; total: number } | null {
+function computeHeadlineExpectancy(signals: SignalLog[], basis: RBasis): { mean: number; total: number } | null {
   const rVals = signals
     .filter((r) => r.outcome !== "active")
-    .map((r) => computeROutcome(r))
+    .map((r) => computeROutcome(r, basis))
     .filter((v): v is number => v !== null);
   if (!rVals.length) return null;
   const total = rVals.reduce((a, b) => a + b, 0);
@@ -1142,7 +1176,8 @@ function historyTimeOfDayBucket(row: SignalLog): string {
 
 function historyPerformanceRows(
   rows: SignalLog[],
-  bucketFor: (row: SignalLog) => string
+  bucketFor: (row: SignalLog) => string,
+  basis: RBasis
 ): HistoryPerfRow[] {
   const grouped = new Map<string, SignalLog[]>();
   for (const row of rows) {
@@ -1161,7 +1196,7 @@ function historyPerformanceRows(
       .filter((row) => row.max_adverse !== null && row.entry_price)
       .map((row) => Math.abs(row.max_adverse!) / row.entry_price * 100);
     const rVals = resolved
-      .map((row) => computeROutcome(row))
+      .map((row) => computeROutcome(row, basis))
       .filter((v): v is number => v !== null);
     return {
       label,
@@ -1207,6 +1242,13 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
     "ex_value", "profile", "tp_magnet", "entry", "sl", "tp1", "tp2", "tp3", "outcome", "r_outcome",
     "duration_minutes", "mfe_pct", "mae_pct", "time_of_day_session",
     "btc_return_15m_pct", "btc_return_1h_pct", "btc_realized_vol_24h_pct",
+    // r_outcome above is the legacy best-TP-touched basis (kept for column
+    // compatibility with older exports); r_exec is the realizable trailing-exit R.
+    "r_exec", "exit_price", "squeeze_score", "taker_buy_ratio", "delta_bias",
+    "bias_1h", "bias_4h", "bias_score_1h", "bias_score_4h",
+    "funding_rate", "fr_bias", "long_short_ratio", "ls_bias",
+    "oi_change_pct", "oi_bias", "relative_strength", "rs_bias",
+    "from_watchlist", "tp2_source", "tp3_source", "outcome_detail",
   ];
   const num2 = (n: number) => Number(n.toFixed(2)); // dot decimal, no thousand separators
   const rows = signals.map((r) => {
@@ -1214,7 +1256,8 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
     const durationMin = endMs !== null ? Math.round((endMs - r.bar_time) / 60_000) : null;
     const mfe = r.max_favorable !== null && r.entry_price ? num2(Math.abs(r.max_favorable) / r.entry_price * 100) : null;
     const mae = r.max_adverse !== null && r.entry_price ? num2(Math.abs(r.max_adverse) / r.entry_price * 100) : null;
-    const rOutcome = computeROutcome(r);
+    const rBestTp = computeROutcome(r, "bestTp");
+    const rExec = computeROutcome(r, "exec");
     return [
       wibTimestamp(r.bar_time),
       r.symbol,
@@ -1232,7 +1275,7 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
       r.tp2,
       r.tp3,
       r.outcome,
-      rOutcome !== null ? Number(rOutcome.toFixed(3)) : null,
+      rBestTp !== null ? Number(rBestTp.toFixed(3)) : null,
       durationMin,
       mfe,
       mae,
@@ -1240,6 +1283,27 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
       r.btc_return_15m_pct !== null ? num2(r.btc_return_15m_pct) : null,
       r.btc_return_1h_pct !== null ? num2(r.btc_return_1h_pct) : null,
       r.btc_realized_vol_24h_pct !== null ? num2(r.btc_realized_vol_24h_pct) : null,
+      rExec !== null ? Number(rExec.toFixed(3)) : null,
+      r.outcome_price ?? execExitPrice(r),
+      r.squeeze_score,
+      r.taker_buy_ratio !== null ? Number(r.taker_buy_ratio.toFixed(4)) : null,
+      r.delta_bias ?? "",
+      r.bias_1h ?? "",
+      r.bias_4h ?? "",
+      r.bias_score_1h,
+      r.bias_score_4h,
+      r.funding_rate,
+      r.fr_bias ?? "",
+      r.long_short_ratio !== null ? Number(r.long_short_ratio.toFixed(4)) : null,
+      r.ls_bias ?? "",
+      r.oi_change_pct !== null ? num2(r.oi_change_pct) : null,
+      r.oi_bias ?? "",
+      r.relative_strength !== null ? Number(r.relative_strength.toFixed(4)) : null,
+      r.rs_bias ?? "",
+      r.from_watchlist ? 1 : 0,
+      r.tp2_source ?? "",
+      r.tp3_source ?? "",
+      r.outcome_detail ?? "",
     ].map(csvField).join(",");
   });
   // UTF-8 BOM (﻿) so Excel reads Unicode correctly.
@@ -1355,14 +1419,14 @@ function emptyCell(): CrossCell {
   return { wins: 0, losses: 0, expired: 0, mfeSum: 0, mfeN: 0, maeSum: 0, maeN: 0, rSum: 0, rN: 0 };
 }
 
-function addToCell(cell: CrossCell, row: SignalLog): void {
+function addToCell(cell: CrossCell, row: SignalLog, basis: RBasis): void {
   if (row.outcome === "active") return; // running trades aren't resolved yet
   if (row.outcome === "sl") cell.losses++;
   else if (row.outcome === "expired") cell.expired++;
   else cell.wins++; // tp1 / tp2 / tp3
   if (row.max_favorable !== null && row.entry_price) { cell.mfeSum += Math.abs(row.max_favorable) / row.entry_price * 100; cell.mfeN++; }
   if (row.max_adverse !== null && row.entry_price)   { cell.maeSum += Math.abs(row.max_adverse)   / row.entry_price * 100; cell.maeN++; }
-  const r = computeROutcome(row);
+  const r = computeROutcome(row, basis);
   if (r !== null) { cell.rSum += r; cell.rN++; }
 }
 
@@ -1430,7 +1494,7 @@ function wibDayStart(ms: number): number {
 
 // Win rate + expectancy for a set of trades (active excluded), matching the
 // definitions used by the breakdown cards and cross-tab.
-function periodGroupStats(rows: SignalLog[]): { n: number; winRate: number | null; expectancy: number | null } {
+function periodGroupStats(rows: SignalLog[], basis: RBasis): { n: number; winRate: number | null; expectancy: number | null } {
   let wins = 0, losses = 0, expired = 0;
   const rs: number[] = [];
   for (const r of rows) {
@@ -1438,7 +1502,7 @@ function periodGroupStats(rows: SignalLog[]): { n: number; winRate: number | nul
     if (r.outcome === "sl") losses++;
     else if (r.outcome === "expired") expired++;
     else wins++;
-    const v = computeROutcome(r);
+    const v = computeROutcome(r, basis);
     if (v !== null) rs.push(v);
   }
   const n = wins + losses + expired;
@@ -1478,7 +1542,7 @@ function fmtPeriodLabel(ms: number): string {
   return `${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
 }
 
-function PerformanceOverTime({ signals }: { signals: SignalLog[] }) {
+function PerformanceOverTime({ signals, rBasis }: { signals: SignalLog[]; rBasis: RBasis }) {
   const [period, setPeriod] = useState<PerfPeriod>("daily");
   const [groupBy, setGroupBy] = useState<PerfGroupKey>("overall");
   const [metric, setMetric] = useState<PerfMetric>("both");
@@ -1499,9 +1563,9 @@ function PerformanceOverTime({ signals }: { signals: SignalLog[] }) {
   const overallRows = useMemo(() => {
     return periods.map((p) => {
       const rows = signals.filter((r) => r.outcome !== "active" && periodStart(r.bar_time) === p);
-      return { p, ...periodGroupStats(rows) };
+      return { p, ...periodGroupStats(rows, rBasis) };
     });
-  }, [signals, periods]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [signals, periods, rBasis]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Grouped: pivot bucket × period.
   const grouped = useMemo(() => {
@@ -1514,11 +1578,11 @@ function PerformanceOverTime({ signals }: { signals: SignalLog[] }) {
         const rows = signals.filter((r) =>
           r.outcome !== "active" && dim.bucketFor(r) === b && periodStart(r.bar_time) === p
         );
-        cells.set(`${b}|${p}`, periodGroupStats(rows));
+        cells.set(`${b}|${p}`, periodGroupStats(rows, rBasis));
       }
     }
     return { buckets, cells };
-  }, [signals, groupBy, periods]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [signals, groupBy, periods, rBasis]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sel = "min-h-[36px] rounded-md border border-neutral-700 bg-neutral-900 px-2 text-xs text-neutral-200 hover:border-neutral-500";
 
@@ -1692,7 +1756,7 @@ function SelectionEdgePanel({ signals }: { signals: SignalLog[] }) {
   );
 }
 
-function CrossTab({ signals }: { signals: SignalLog[] }) {
+function CrossTab({ signals, rBasis }: { signals: SignalLog[]; rBasis: RBasis }) {
   const [rowDim, setRowDim] = useState<CrossTabDimKey>("regime");
   const [colDim, setColDim] = useState<CrossTabDimKey>("side");
   const [selected, setSelected] = useState<{ rb: string; cb: string } | null>(null);
@@ -1721,13 +1785,13 @@ function CrossTab({ signals }: { signals: SignalLog[] }) {
       const key = `${rb} ${cb}`;
       let cell = cells.get(key);
       if (!cell) { cell = emptyCell(); cells.set(key, cell); }
-      addToCell(cell, row);
-      addToCell(rowTotals.get(rb)!, row);
-      addToCell(colTotals.get(cb)!, row);
-      addToCell(grand, row);
+      addToCell(cell, row, rBasis);
+      addToCell(rowTotals.get(rb)!, row, rBasis);
+      addToCell(colTotals.get(cb)!, row, rBasis);
+      addToCell(grand, row, rBasis);
     }
     return { rowBuckets, colBuckets, cells, rowTotals, colTotals, grand };
-  }, [signals, rowDim, colDim]);
+  }, [signals, rowDim, colDim, rBasis]);
 
   // Resolved trades (win/loss/expired, i.e. non-active) behind the clicked cell.
   const selectedTrades = useMemo(() => {
