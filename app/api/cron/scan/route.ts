@@ -165,7 +165,7 @@ export async function GET(req: NextRequest) {
 
     // Squeeze Potential Score (0–6)
     const enrichedSignals = allRecentSignals
-      .filter((signal) => passesBiasConfirmation(signal, bias1h, bias4h, regime))
+      .filter((signal) => passesBiasConfirmation(signal, bias1h, bias4h))
       .map((signal) => {
         const frBias = frInfo !== undefined
           ? classifyFR(signal.side, frInfo.lastFundingRate, regime)
@@ -445,8 +445,6 @@ export async function GET(req: NextRequest) {
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-// In FLUSH regime, long signals with bearish HTF are contrarian bounces — don't block them.
-// Shorts confirmed normally; so do all non-flush signals.
 type Bias = ReturnType<typeof analyzeBias>;
 
 function enrichWatchCandidate(
@@ -573,13 +571,14 @@ function estimateBiasWindow(
   return "1-2d";
 }
 
+// Flush-regime longs used to bypass HTF confirmation as "contrarian bounces",
+// but 13 days of outcomes priced that bucket at -0.32R executable (n=262) —
+// the worst slice in the log. Flush longs now confirm like everything else.
 function passesBiasConfirmation(
   signal: Signal,
   bias1h: Bias,
-  bias4h: Bias,
-  regime: MarketRegime
+  bias4h: Bias
 ): boolean {
-  if (regime === "flush" && signal.side === "long") return true;
   const opposite = signal.side === "long" ? "short" : "long";
   if (bias4h.bias === opposite || bias1h.bias === opposite) return false;
   if (bias4h.bias === signal.side || bias1h.bias === signal.side) return true;
