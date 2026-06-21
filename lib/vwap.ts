@@ -75,10 +75,24 @@ function startOfPrevUtcMonth(ms: number): number {
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1);
 }
 
+// 1st 00:00 UTC of the quarter containing `ms` (Jan/Apr/Jul/Oct).
+function startOfUtcQuarter(ms: number): number {
+  const d = new Date(ms);
+  const qMonth = Math.floor(d.getUTCMonth() / 3) * 3;
+  return Date.UTC(d.getUTCFullYear(), qMonth, 1);
+}
+
+// 1st 00:00 UTC of the quarter before the one containing `ms` (handles year wrap).
+function startOfPrevUtcQuarter(ms: number): number {
+  const d = new Date(startOfUtcQuarter(ms));
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 3, 1);
+}
+
 // Earliest kline timestamp the research backfill must fetch to anchor every level
-// (prev-month VWAP) for a signal at `ms`. Exported so the route can size its range.
-export function prevMonthAnchorFloor(ms: number): number {
-  return startOfPrevUtcMonth(ms);
+// (prev-quarter VWAP is the deepest) for a signal at `ms`. Exported so the route
+// can size its range.
+export function prevQuarterAnchorFloor(ms: number): number {
+  return startOfPrevUtcQuarter(ms);
 }
 
 // Volume-weighted typical price over bars whose openTime is in [startMs, endMs].
@@ -95,23 +109,30 @@ function vwapWindow(klines: Kline[], startMs: number, endMs: number): number | n
 }
 
 export interface VwapLevels {
-  weekly: number | null;     // anchored at week start, through the signal bar
-  monthly: number | null;    // anchored at month start, through the signal bar
-  prevWeek: number | null;   // full VWAP of the previous completed week (static level)
-  prevMonth: number | null;  // full VWAP of the previous completed month (static level)
+  weekly: number | null;      // anchored at week start, through the signal bar
+  monthly: number | null;     // anchored at month start, through the signal bar
+  prevWeek: number | null;    // full VWAP of the previous completed week (static)
+  prevMonth: number | null;   // full VWAP of the previous completed month (static)
+  quarter: number | null;     // anchored at quarter start, through the signal bar
+  prevQuarter: number | null; // full VWAP of the previous completed quarter (static, "pqVWAP")
 }
 
-// The four anchored VWAPs as they stood at `signalBarMs` (the signal bar's open).
+// The anchored VWAPs as they stood at `signalBarMs` (the signal bar's open).
+// `klines` must reach back to the previous quarter's start to fill every level.
 export function computeVwapLevels(klines: Kline[], signalBarMs: number): VwapLevels {
   const ws = startOfUtcWeek(signalBarMs);
   const ms = startOfUtcMonth(signalBarMs);
+  const qs = startOfUtcQuarter(signalBarMs);
   const pws = ws - 7 * DAY_MS;
   const pms = startOfPrevUtcMonth(signalBarMs);
+  const pqs = startOfPrevUtcQuarter(signalBarMs);
   return {
     weekly: vwapWindow(klines, ws, signalBarMs),
     monthly: vwapWindow(klines, ms, signalBarMs),
     prevWeek: vwapWindow(klines, pws, ws - 1),
     prevMonth: vwapWindow(klines, pms, ms - 1),
+    quarter: vwapWindow(klines, qs, signalBarMs),
+    prevQuarter: vwapWindow(klines, pqs, qs - 1),
   };
 }
 

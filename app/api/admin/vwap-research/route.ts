@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { neon } from "@neondatabase/serverless";
 import { fetchKlineRange, withConcurrency } from "@/lib/binance";
-import { computeVwapLevels, prevMonthAnchorFloor, signedDistPct } from "@/lib/vwap";
+import { computeVwapLevels, prevQuarterAnchorFloor, signedDistPct } from "@/lib/vwap";
 import { ensureSchema } from "@/lib/db";
 import type { Timeframe } from "@/lib/types";
 
@@ -9,14 +9,16 @@ export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
 // Research-only backfill: for each historical signal, computes how far its entry
-// sat from the weekly / monthly / prev-week / prev-month anchored VWAP at fire
-// time, and stores the four signed distances (% of entry vs level). This lets us
-// test the hypothesis that POC's weakness can be filtered by higher-TF VWAP
-// confluence — WITHOUT touching the live scanner.
+// sat from the weekly / monthly / prev-week / prev-month / quarter / prev-quarter
+// anchored VWAP at fire time, and stores the six signed distances (% of entry vs
+// level). This lets us test whether higher-TF VWAP confluence — up to the
+// previous-quarter VWAP (pqVWAP) traders fade rejections off — adds signal beyond
+// weekly/monthly, WITHOUT touching the live scanner.
 //
-// VWAP is anchored on 4h klines (plenty accurate for multi-week anchors, and one
-// page per symbol covers ~2 months). Existing non-NULL values are never
-// overwritten, so the run is idempotent and resumable.
+// VWAP is anchored on 4h klines (plenty accurate for multi-week anchors); the
+// fetch reaches back to the previous quarter's start (the deepest anchor).
+// Existing non-NULL values are never overwritten, so the run is idempotent and
+// resumable, keyed on the quarter column so a re-run tops up the new levels.
 //
 // Usage:
 //   curl -X POST -H "Authorization: Bearer <CRON_SECRET>" "<app>/api/admin/vwap-research?dryRun=1"
@@ -46,8 +48,10 @@ export async function POST(req: NextRequest) {
   const limit = Math.min(Number(req.nextUrl.searchParams.get("limit") ?? 400), 800);
   const dryRun = req.nextUrl.searchParams.get("dryRun") === "1";
 
+  // Keyed on the quarter column: rows filled by the earlier (weekly/monthly-only)
+  // version still have NULL quarter/prev-quarter, so a re-run tops them up.
   const nullCount = (await sql`
-    SELECT COUNT(*) AS n FROM signal_log WHERE dist_vwap_weekly_pct IS NULL`)[0] as { n: number };
+    SELECT COUNT(*) AS n FROM signal_log WHERE dist_vwap_quarter_pct IS NULL`)[0] as { n: number };
 
   if (dryRun) {
     return NextResponse.json({ ok: true, dryRun: true, remaining: Number(nullCount.n) });
@@ -56,7 +60,7 @@ export async function POST(req: NextRequest) {
   const rows = (await sql`
     SELECT id, symbol, timeframe, bar_time, entry_price
     FROM signal_log
-    WHERE dist_vwap_weekly_pct IS NULL AND entry_price > 0
+    WHERE dist_vwap_quarter_pct IS NULL AND entry_price > 0
     ORDER BY symbol ASC, bar_time ASC
     LIMIT ${limit}`) as Row[];
 
@@ -75,8 +79,8 @@ export async function POST(req: NextRequest) {
       const times = group.map((g) => Number(g.bar_time));
       const earliest = Math.min(...times);
       const latest = Math.max(...times);
-      // Need the previous month's bars to anchor prev-month VWAP for the earliest row.
-      const start = prevMonthAnchorFloor(earliest);
+      // Reach back to the previous quarter's start (the deepest anchor, for pqVWAP).
+      const start = prevQuarterAnchorFloor(earliest);
       const end = latest + 4 * 60 * 60_000;
       const klines = await fetchKlineRange(symbol, "4h", start, end);
       if (klines.length === 0) return;
@@ -90,13 +94,17 @@ export async function POST(req: NextRequest) {
         const dM = signedDistPct(entry, levels.monthly);
         const dPW = signedDistPct(entry, levels.prevWeek);
         const dPM = signedDistPct(entry, levels.prevMonth);
-        if (dW === null && dM === null && dPW === null && dPM === null) continue;
+        const dQ = signedDistPct(entry, levels.quarter);
+        const dPQ = signedDistPct(entry, levels.prevQuarter);
+        if (dW === null && dM === null && dPW === null && dPM === null && dQ === null && dPQ === null) continue;
         await sql`
           UPDATE signal_log SET
-            dist_vwap_weekly_pct  = COALESCE(dist_vwap_weekly_pct, ${dW}),
-            dist_vwap_monthly_pct = COALESCE(dist_vwap_monthly_pct, ${dM}),
-            dist_vwap_pweek_pct   = COALESCE(dist_vwap_pweek_pct, ${dPW}),
-            dist_vwap_pmonth_pct  = COALESCE(dist_vwap_pmonth_pct, ${dPM})
+            dist_vwap_weekly_pct   = COALESCE(dist_vwap_weekly_pct, ${dW}),
+            dist_vwap_monthly_pct  = COALESCE(dist_vwap_monthly_pct, ${dM}),
+            dist_vwap_pweek_pct    = COALESCE(dist_vwap_pweek_pct, ${dPW}),
+            dist_vwap_pmonth_pct   = COALESCE(dist_vwap_pmonth_pct, ${dPM}),
+            dist_vwap_quarter_pct  = COALESCE(dist_vwap_quarter_pct, ${dQ}),
+            dist_vwap_pquarter_pct = COALESCE(dist_vwap_pquarter_pct, ${dPQ})
           WHERE id = ${r.id}`;
         filled.rows++;
       }
@@ -107,7 +115,7 @@ export async function POST(req: NextRequest) {
   });
 
   const remaining = (await sql`
-    SELECT COUNT(*) AS n FROM signal_log WHERE dist_vwap_weekly_pct IS NULL`)[0] as { n: number };
+    SELECT COUNT(*) AS n FROM signal_log WHERE dist_vwap_quarter_pct IS NULL`)[0] as { n: number };
 
   return NextResponse.json({
     ok: true,

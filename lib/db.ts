@@ -153,6 +153,8 @@ export async function ensureSchema() {
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_vwap_monthly_pct REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_vwap_pweek_pct REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_vwap_pmonth_pct REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_vwap_quarter_pct REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_vwap_pquarter_pct REAL`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_outcome  ON signal_log(outcome)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_bar_time ON signal_log(bar_time DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_symbol   ON signal_log(symbol)`;
@@ -392,6 +394,8 @@ export interface SignalLog {
   dist_vwap_monthly_pct: number | null;
   dist_vwap_pweek_pct: number | null;
   dist_vwap_pmonth_pct: number | null;
+  dist_vwap_quarter_pct: number | null;
+  dist_vwap_pquarter_pct: number | null;
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -485,6 +489,8 @@ function normalizeSignalLog(row: unknown): SignalLog {
     dist_vwap_monthly_pct: toNullableNumber(r.dist_vwap_monthly_pct),
     dist_vwap_pweek_pct: toNullableNumber(r.dist_vwap_pweek_pct),
     dist_vwap_pmonth_pct: toNullableNumber(r.dist_vwap_pmonth_pct),
+    dist_vwap_quarter_pct: toNullableNumber(r.dist_vwap_quarter_pct),
+    dist_vwap_pquarter_pct: toNullableNumber(r.dist_vwap_pquarter_pct),
   };
 }
 
