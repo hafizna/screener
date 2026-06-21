@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   fetchFundingRates,
   fetchKlines,
+  fetchKlineRange,
   fetchLongShortRatio,
   fetchOIHistory,
   fetchTopSymbolsByVolume,
@@ -13,7 +14,7 @@ import type { BiasWindow, FRBias, LsBias, MarketRegime, Signal, SignalType, Scan
 import { analyzeBias } from "@/lib/bias";
 import { classifyFR, classifyLs } from "@/lib/funding";
 import { detectRecentSignals, detectWatchCandidate } from "@/lib/signals";
-import { dailyVwap, weeklyVwap, monthlyVwap, signedDistPct } from "@/lib/vwap";
+import { dailyVwap, weeklyVwap, monthlyVwap, signedDistPct, computeVwapLevels, prevQuarterAnchorFloor } from "@/lib/vwap";
 import { computeTargets } from "@/lib/targets";
 import { storeScanResult, loadLatestScan } from "@/lib/kv";
 import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, updateBestTP, expireOldSignals, pruneOldSignals, upsertRadarCandidates, markRadarFired, pruneStaleRadar, insertScanFunnel, insertSignalTraceSnapshot } from "@/lib/db";
@@ -369,6 +370,18 @@ export async function GET(req: NextRequest) {
       const radarFirstSeen = s.fromWatchlist
         ? await markRadarFired(s.symbol, s.side, scanResult.scannedAt).catch(() => null)
         : null;
+      // pqVWAP (previous-quarter VWAP) distance — only for fired signals (few per
+      // scan), so the extra ~1 quarter of 4h klines is cheap. Powers the board's
+      // discretionary rejection badge; never blocks the signal.
+      try {
+        const start = prevQuarterAnchorFloor(s.barTime);
+        const kl = await fetchKlineRange(s.symbol, "4h", start, s.barTime + 4 * 60 * 60_000);
+        if (kl.length > 0) {
+          const pq = computeVwapLevels(kl, s.barTime).prevQuarter;
+          const d = signedDistPct(s.barClose, pq);
+          if (d !== null) s.distVwapPquarterPct = d;
+        }
+      } catch { /* pqVWAP is best-effort; absence just means no badge */ }
       return insertSignal(s, scanResult.scannedAt, regime, radarFirstSeen, btcContext);
     }));
     dbSignalsInserted = inserted.filter(Boolean).length;

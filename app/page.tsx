@@ -704,6 +704,7 @@ function TradeCard({ row, stage, onAction, onSelectTrace }: {
         <SideTag side={row.side} />
         <SignalTypeBadge type={row.signal_type as SignalType | undefined} />
         {row.squeeze_score != null && <SqueezeBadge score={row.squeeze_score} />}
+        {isPqVwapRejection(row) && <PqVwapRejectBadge />}
         {stage === "fired" && <TradeLifecycleBadge signal={row} currentPrice={row.current_price} />}
       </div>
 
@@ -2189,6 +2190,28 @@ function SqueezeBadge({ score }: { score: number }) {
       title={`Squeeze potential score ${score}/6 (L/S positioning + FR magnitude + OI rising + RS divergence)`}
     >
       {score}
+    </span>
+  );
+}
+
+// A "pqVWAP rejection" is a fade at the previous-quarter VWAP: entry within 1.5%
+// of pqVWAP, on the mean-reversion side (short at/above it, long at/below it).
+// Rare but high-value (in-sample short fades scored +0.79R, N=12 — discretionary,
+// not validated). Only fired signals carry dist_vwap_pquarter_pct.
+const PQVWAP_REJECT_PCT = 1.5;
+function isPqVwapRejection(row: Pick<SignalLog, "side" | "dist_vwap_pquarter_pct">): boolean {
+  const d = row.dist_vwap_pquarter_pct;
+  if (d == null || Math.abs(d) > PQVWAP_REJECT_PCT) return false;
+  return row.side === "short" ? d >= 0 : d <= 0;
+}
+
+function PqVwapRejectBadge() {
+  return (
+    <span
+      className="inline-flex items-center px-1.5 py-0.5 rounded text-xs border bg-fuchsia-950/60 text-fuchsia-300 border-fuchsia-800/60"
+      title="pqVWAP rejection: entry is fading the previous-quarter VWAP (big higher-TF level). Rare, high-value discretionary setup — NOT a validated/automated edge (in-sample N=12)."
+    >
+      pqVWAP⚡
     </span>
   );
 }

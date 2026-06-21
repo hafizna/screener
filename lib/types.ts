@@ -109,6 +109,9 @@ export interface Signal {
   // (+ve = entry above the VWAP). Confluence feature for the board quality filter.
   distVwapWeeklyPct?: number;
   distVwapMonthlyPct?: number;
+  // Signed % distance from the previous-quarter VWAP (pqVWAP). Computed only for
+  // fired signals (one extra fetch each); powers the discretionary rejection badge.
+  distVwapPquarterPct?: number;
   // Which magnet each TP snapped to: "atr" (pure cap), "vwap_daily", "vwap_weekly".
   tp2Source?: "atr" | "vwap_daily" | "vwap_weekly";
   tp3Source?: "atr" | "vwap_daily" | "vwap_weekly";

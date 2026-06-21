@@ -282,7 +282,7 @@ export async function insertSignal(
        near_pdh, near_pdl, from_watchlist, bar_time, scanned_at,
        tp2_source, tp3_source, radar_first_seen,
        btc_return_15m_pct, btc_return_1h_pct, btc_realized_vol_24h_pct,
-       dist_vwap_weekly_pct, dist_vwap_monthly_pct)
+       dist_vwap_weekly_pct, dist_vwap_monthly_pct, dist_vwap_pquarter_pct)
     VALUES (
       ${`${s.symbol}-${s.timeframe}-${s.barTime}`},
       ${s.symbol}, ${s.timeframe}, ${s.side},
@@ -306,7 +306,8 @@ export async function insertSignal(
       ${radarFirstSeen ?? null},
       ${btc?.btcReturn15mPct ?? null}, ${btc?.btcReturn1hPct ?? null},
       ${btc?.btcRealizedVol24hPct ?? null},
-      ${s.distVwapWeeklyPct ?? null}, ${s.distVwapMonthlyPct ?? null}
+      ${s.distVwapWeeklyPct ?? null}, ${s.distVwapMonthlyPct ?? null},
+      ${s.distVwapPquarterPct ?? null}
     )
     ON CONFLICT (id) DO NOTHING
     RETURNING id
