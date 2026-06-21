@@ -13,7 +13,7 @@ import type { BiasWindow, FRBias, LsBias, MarketRegime, Signal, SignalType, Scan
 import { analyzeBias } from "@/lib/bias";
 import { classifyFR, classifyLs } from "@/lib/funding";
 import { detectRecentSignals, detectWatchCandidate } from "@/lib/signals";
-import { dailyVwap, weeklyVwap } from "@/lib/vwap";
+import { dailyVwap, weeklyVwap, monthlyVwap, signedDistPct } from "@/lib/vwap";
 import { computeTargets } from "@/lib/targets";
 import { storeScanResult, loadLatestScan } from "@/lib/kv";
 import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, updateBestTP, expireOldSignals, pruneOldSignals, upsertRadarCandidates, markRadarFired, pruneStaleRadar, insertScanFunnel, insertSignalTraceSnapshot } from "@/lib/db";
@@ -147,6 +147,9 @@ export async function GET(req: NextRequest) {
     // from 1h. Used as observable confluence and to anchor TP2/TP3 magnets.
     const vwapDaily = dailyVwap(entryKlines);
     const vwapWeekly = weeklyVwap(oneHourKlines);
+    // Monthly VWAP from 4h klines (≈33 days, enough to anchor at the 1st). Powers
+    // the board quality filter's confluence gate; costs no extra fetch.
+    const vwapMonthly = monthlyVwap(fourHourKlines);
 
     // Also detect 1H signals (free — klines already fetched above)
     const recentSignals1h = detectRecentSignals(symbol, "1h", oneHourKlines, RECENT_SIGNAL_BARS_1H);
@@ -205,6 +208,11 @@ export async function GET(req: NextRequest) {
           ...(vwapWeekly != null ? {
             vwapWeekly,
             nearWeeklyVwap: Math.abs(entry - vwapWeekly) <= atr1h * 0.5,
+            distVwapWeeklyPct: signedDistPct(entry, vwapWeekly) ?? undefined,
+          } : {}),
+          ...(vwapMonthly != null ? {
+            vwapMonthly,
+            distVwapMonthlyPct: signedDistPct(entry, vwapMonthly) ?? undefined,
           } : {}),
           ...(relativeStrength !== undefined ? { relativeStrength, rsBias } : {}),
           squeezeScore,

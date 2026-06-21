@@ -241,13 +241,31 @@ function LifecycleBoard({
   const [selectedTraceId, setSelectedTraceId] = useState<string | null>(null);
   const [qualityFilter, setQualityFilter] = useState(false);
 
-  // Quality filter: drop the three statistically weak categories identified in analysis.
+  // Quality filter: drop the statistically weak categories identified in analysis.
   // Always keeps entered trades visible regardless of category.
+  //
+  // On top of the original three drops (sqz=0 / bounce / high-conf breakout), it now
+  // enforces the validated higher-TF VWAP confluence rule (in-sample +0.36R exec vs
+  // -0.07R baseline): the entry must sit within 0.75% of the weekly or monthly
+  // anchored VWAP, and long "chasing" (entry above the monthly VWAP) is dropped —
+  // mean-reversion toward VWAP wins, chasing away from it loses. VWAP columns are
+  // only present on signals fired after this shipped, so when they're null the
+  // confluence checks are skipped (older live rows aren't penalised).
+  const VWAP_NEAR_PCT = 0.75;
   const passesQuality = (t: BoardTrade): boolean => {
     if (t.user_action === "enter") return true;
     if (historySqueezeBucket(t) === "0" || historySqueezeBucket(t) === "none") return false;
     if (t.signal_type === "bounce") return false;
     if (historyConfidenceBucket(t) === "high" && t.regime === "breakout") return false;
+    const dw = t.dist_vwap_weekly_pct;
+    const dm = t.dist_vwap_monthly_pct;
+    if (dw != null || dm != null) {
+      const nearVwap =
+        (dw != null && Math.abs(dw) <= VWAP_NEAR_PCT) ||
+        (dm != null && Math.abs(dm) <= VWAP_NEAR_PCT);
+      if (!nearVwap) return false;
+      if (t.side === "long" && dm != null && dm > 0) return false; // chasing above VWAP
+    }
     return true;
   };
 
@@ -314,7 +332,7 @@ function LifecycleBoard({
         </FilterGroup>
         <button
           onClick={() => setQualityFilter((v) => !v)}
-          title="Hide sqz=0, bounce type, and high-conf breakout signals (low-EV categories per analysis)"
+          title="High-confluence only: hides sqz=0 / bounce / high-conf breakout, and (for signals with VWAP data) keeps just entries within 0.75% of weekly/monthly VWAP, dropping long chases above VWAP"
           className={`px-2.5 py-1 text-xs rounded-md transition-colors border ${
             qualityFilter
               ? "bg-amber-500/20 border-amber-600/60 text-amber-300"

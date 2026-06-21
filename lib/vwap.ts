@@ -45,6 +45,16 @@ export function weeklyVwap(klines: Kline[]): number | null {
   return vwapOver(klines, anchor);
 }
 
+// Monthly VWAP anchored to the 1st of the UTC month. Pass 4h klines (200 × 4h ≈
+// 33 days covers the full current month back to the 1st in all cases).
+export function monthlyVwap(klines: Kline[]): number | null {
+  if (klines.length === 0) return null;
+  const last = klines[klines.length - 1].openTime;
+  const d = new Date(last);
+  const anchor = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+  return vwapOver(klines, anchor);
+}
+
 // ─── Research: anchored higher-TF VWAPs at a point in time ────────────────────
 // Used by /api/admin/vwap-research to test whether a signal's proximity to a
 // weekly / monthly / prev-week / prev-month VWAP predicts its outcome. These are

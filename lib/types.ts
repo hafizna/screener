@@ -104,6 +104,11 @@ export interface Signal {
   // midnight, weekly resets UTC Monday). Also used to anchor TP2/TP3 magnets.
   vwapDaily?: number;
   vwapWeekly?: number;
+  vwapMonthly?: number;
+  // Signed % distance of entry from the weekly/monthly anchored VWAP at fire time
+  // (+ve = entry above the VWAP). Confluence feature for the board quality filter.
+  distVwapWeeklyPct?: number;
+  distVwapMonthlyPct?: number;
   // Which magnet each TP snapped to: "atr" (pure cap), "vwap_daily", "vwap_weekly".
   tp2Source?: "atr" | "vwap_daily" | "vwap_weekly";
   tp3Source?: "atr" | "vwap_daily" | "vwap_weekly";
