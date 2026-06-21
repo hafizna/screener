@@ -82,6 +82,55 @@ export async function fetchKlines(
   return klines;
 }
 
+// Fetch every closed kline in [startMs, endMs] for a symbol, paginating past the
+// 1500-bar per-request cap. Used by the VWAP research backfill, which needs ~2
+// months of 4h bars per symbol to anchor monthly/prev-month VWAPs.
+const INTERVAL_MS: Record<Timeframe, number> = {
+  "15m": 15 * 60_000,
+  "30m": 30 * 60_000,
+  "1h": 60 * 60_000,
+  "4h": 4 * 60 * 60_000,
+};
+
+export async function fetchKlineRange(
+  symbol: string,
+  timeframe: Timeframe,
+  startMs: number,
+  endMs: number,
+  signal?: AbortSignal,
+): Promise<Kline[]> {
+  const interval = TIMEFRAME_TO_INTERVAL[timeframe];
+  const stepMs = INTERVAL_MS[timeframe];
+  const out: Kline[] = [];
+  let cursor = startMs;
+  // Each page is ≤1500 bars; guard caps total pages so a bad range can't loop forever.
+  for (let page = 0; page < 30 && cursor <= endMs; page++) {
+    const url = `${FAPI_BASE}/fapi/v1/klines?symbol=${symbol}&interval=${interval}&startTime=${cursor}&endTime=${endMs}&limit=1500`;
+    const res = await fetch(url, { signal, cache: "no-store" });
+    if (!res.ok) break;
+    const raw = (await res.json()) as unknown[][];
+    if (!raw.length) break;
+    for (const r of raw) {
+      out.push({
+        openTime: r[0] as number,
+        open: parseFloat(r[1] as string),
+        high: parseFloat(r[2] as string),
+        low: parseFloat(r[3] as string),
+        close: parseFloat(r[4] as string),
+        volume: parseFloat(r[5] as string),
+        closeTime: r[6] as number,
+        takerBuyVolume: parseFloat(r[9] as string),
+      });
+    }
+    cursor = (raw[raw.length - 1][0] as number) + stepMs;
+    if (raw.length < 1500) break;
+  }
+  // Drop a still-open final bar — only closed bars are used.
+  const now = Date.now();
+  if (out.length > 0 && out[out.length - 1].closeTime > now) out.pop();
+  return out;
+}
+
 interface TickerStats {
   symbol: string;
   quoteVolume: number;

@@ -1249,6 +1249,8 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
     "funding_rate", "fr_bias", "long_short_ratio", "ls_bias",
     "oi_change_pct", "oi_bias", "relative_strength", "rs_bias",
     "from_watchlist", "tp2_source", "tp3_source", "outcome_detail",
+    // Higher-TF anchored-VWAP distances (research; filled by /api/admin/vwap-research).
+    "dist_vwap_weekly_pct", "dist_vwap_monthly_pct", "dist_vwap_pweek_pct", "dist_vwap_pmonth_pct",
   ];
   const num2 = (n: number) => Number(n.toFixed(2)); // dot decimal, no thousand separators
   const rows = signals.map((r) => {
@@ -1304,6 +1306,10 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
       r.tp2_source ?? "",
       r.tp3_source ?? "",
       r.outcome_detail ?? "",
+      r.dist_vwap_weekly_pct !== null ? num2(r.dist_vwap_weekly_pct) : null,
+      r.dist_vwap_monthly_pct !== null ? num2(r.dist_vwap_monthly_pct) : null,
+      r.dist_vwap_pweek_pct !== null ? num2(r.dist_vwap_pweek_pct) : null,
+      r.dist_vwap_pmonth_pct !== null ? num2(r.dist_vwap_pmonth_pct) : null,
     ].map(csvField).join(",");
   });
   // UTF-8 BOM (﻿) so Excel reads Unicode correctly.

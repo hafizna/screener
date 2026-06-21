@@ -147,6 +147,12 @@ export async function ensureSchema() {
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS btc_return_15m_pct REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS btc_return_1h_pct REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS btc_realized_vol_24h_pct REAL`;
+  // Higher-TF anchored-VWAP distances (research-only; filled by /api/admin/vwap-research).
+  // Signed % of entry vs each level: +ve = entry above the VWAP, -ve = below.
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_vwap_weekly_pct REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_vwap_monthly_pct REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_vwap_pweek_pct REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_vwap_pmonth_pct REAL`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_outcome  ON signal_log(outcome)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_bar_time ON signal_log(bar_time DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_symbol   ON signal_log(symbol)`;
@@ -380,6 +386,10 @@ export interface SignalLog {
   btc_return_15m_pct: number | null;
   btc_return_1h_pct: number | null;
   btc_realized_vol_24h_pct: number | null;
+  dist_vwap_weekly_pct: number | null;
+  dist_vwap_monthly_pct: number | null;
+  dist_vwap_pweek_pct: number | null;
+  dist_vwap_pmonth_pct: number | null;
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -469,6 +479,10 @@ function normalizeSignalLog(row: unknown): SignalLog {
     btc_return_15m_pct: toNullableNumber(r.btc_return_15m_pct),
     btc_return_1h_pct: toNullableNumber(r.btc_return_1h_pct),
     btc_realized_vol_24h_pct: toNullableNumber(r.btc_realized_vol_24h_pct),
+    dist_vwap_weekly_pct: toNullableNumber(r.dist_vwap_weekly_pct),
+    dist_vwap_monthly_pct: toNullableNumber(r.dist_vwap_monthly_pct),
+    dist_vwap_pweek_pct: toNullableNumber(r.dist_vwap_pweek_pct),
+    dist_vwap_pmonth_pct: toNullableNumber(r.dist_vwap_pmonth_pct),
   };
 }
 
