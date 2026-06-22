@@ -25,7 +25,31 @@ interface EntryViability {
 
 
 type BoardRadar = RadarLog & { current_price: number | null };
-type BoardTrade = SignalLog & { current_price: number | null; trace?: SignalTraceSnapshot[] };
+type BoardTrade = SignalLog & { current_price: number | null; trace?: SignalTraceSnapshot[]; dupeCount?: number };
+
+// View-level dedup: collapse a symbol+side to one row so a ticker that fired many
+// times (or 15m+1h both firing) doesn't spam the board. The scanner still LOGS
+// every signal — this only affects the live view. An entered trade is always kept;
+// otherwise the most recent signal wins, and dupeCount records how many collapsed.
+function dedupeBySymbolSide(rows: BoardTrade[]): BoardTrade[] {
+  const ordered = [...rows].sort((a, b) => {
+    const ae = a.user_action === "enter" ? 0 : 1;
+    const be = b.user_action === "enter" ? 0 : 1;
+    if (ae !== be) return ae - be;
+    return b.bar_time - a.bar_time;
+  });
+  const kept = new Map<string, BoardTrade>();
+  const count = new Map<string, number>();
+  for (const r of ordered) {
+    const k = `${r.symbol}-${r.side}`;
+    count.set(k, (count.get(k) ?? 0) + 1);
+    if (!kept.has(k)) kept.set(k, r);
+  }
+  return [...kept.values()].map((r) => {
+    const n = count.get(`${r.symbol}-${r.side}`) ?? 1;
+    return n > 1 ? { ...r, dupeCount: n } : r;
+  });
+}
 interface BoardData { radar: BoardRadar[]; tracked: BoardTrade[]; resolved: BoardTrade[] }
 
 export default function DashboardPage() {
@@ -276,8 +300,13 @@ function LifecycleBoard({
   const resolvedAll = (board?.resolved ?? []).filter((t) => sideOk(t.side));
 
   // Fired = active, no TP yet. Running = active, already hit ≥ TP1.
-  const fired = tracked.filter((t) => t.outcome === "active" && t.best_tp == null && (!qualityFilter || passesQuality(t)));
-  const running = tracked.filter((t) => t.outcome === "active" && t.best_tp != null && (!qualityFilter || passesQuality(t)));
+  // Deduped to one row per symbol+side (running supersedes a fresh fired for the
+  // same ticker — you'd already be in that trade).
+  const firedRaw = tracked.filter((t) => t.outcome === "active" && t.best_tp == null && (!qualityFilter || passesQuality(t)));
+  const runningRaw = tracked.filter((t) => t.outcome === "active" && t.best_tp != null && (!qualityFilter || passesQuality(t)));
+  const running = dedupeBySymbolSide(runningRaw);
+  const runningKeys = new Set(running.map((r) => `${r.symbol}-${r.side}`));
+  const fired = dedupeBySymbolSide(firedRaw.filter((r) => !runningKeys.has(`${r.symbol}-${r.side}`)));
   // A tracked row can also be resolved-but-starred; fold those into resolved.
   const resolvedFromTracked = tracked.filter((t) => t.outcome !== "active");
   const resolvedIds = new Set(resolvedFromTracked.map((r) => r.id));
@@ -694,6 +723,11 @@ function TradeCard({ row, stage, onAction, onSelectTrace }: {
           {row.symbol}
           {row.user_action === "enter" && <span className="text-emerald-400" title="You entered">▲</span>}
           {row.user_action === "skip" && <span className="text-neutral-600" title="You skipped">▽</span>}
+          {row.dupeCount && row.dupeCount > 1 && (
+            <span className="text-neutral-500 text-xs font-normal" title={`${row.dupeCount} signals fired for this ticker+side — showing the latest; the rest are collapsed`}>
+              ×{row.dupeCount}
+            </span>
+          )}
         </span>
         {stage === "fired"
           ? <ZBadge level={(row.z_level as 1 | 2 | 3) || 1} z={row.z_score} />
@@ -982,6 +1016,8 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
           {filteredSignals.length > RENDER_CAP && ` (showing latest ${RENDER_CAP})`}
         </div>
       </section>
+
+      <EquityCurvePanel signals={confidenceSignals} rBasis={rBasis} />
 
       <div className="mb-4 grid gap-3 lg:grid-cols-2 xl:grid-cols-4">
         <HistoryBreakdown title="Confidence" rows={confidenceRows} />
@@ -1568,6 +1604,88 @@ const PERF_MIN_N = 5;        // hide cells / de-emphasize bars below this sample
 function fmtPeriodLabel(ms: number): string {
   const d = wibDate(ms);
   return `${String(d.getUTCMonth() + 1).padStart(2, "0")}-${String(d.getUTCDate()).padStart(2, "0")}`;
+}
+
+// Holistic equity curve + performance panel — the honest "overall performance"
+// view (one dimension: time), modelled on a standard backtest report. Everything
+// is in R (1R = the risk per trade), respecting the active confidence filter and
+// the exec/best-TP basis. Immune to the curse-of-dimensionality critique because
+// it summarises the whole strategy over time rather than slicing into cells.
+function EquityCurvePanel({ signals, rBasis }: { signals: SignalLog[]; rBasis: RBasis }) {
+  const data = useMemo(() => {
+    const rows = signals
+      .map((s) => ({ t: s.outcome_at ?? s.bar_time, r: computeROutcome(s, rBasis), side: s.side }))
+      .filter((x): x is { t: number; r: number; side: "long" | "short" } => x.r !== null && Number.isFinite(x.t))
+      .sort((a, b) => a.t - b.t);
+    if (rows.length === 0) return null;
+    let cum = 0, peak = 0, maxDD = 0, peakT = rows[0].t, maxUW = 0;
+    let sumWin = 0, sumLoss = 0, nWin = 0, nLoss = 0, lWin = 0, lTot = 0, sWin = 0, sTot = 0;
+    const pts: number[] = [];
+    for (const x of rows) {
+      cum += x.r;
+      if (cum > peak) { peak = cum; peakT = x.t; }
+      if (peak - cum > maxDD) maxDD = peak - cum;
+      if (x.t - peakT > maxUW) maxUW = x.t - peakT;
+      pts.push(cum);
+      if (x.r > 0) { sumWin += x.r; nWin++; } else if (x.r < 0) { sumLoss += x.r; nLoss++; }
+      if (x.side === "long") { lTot++; if (x.r > 0) lWin++; } else { sTot++; if (x.r > 0) sWin++; }
+    }
+    const n = rows.length;
+    return {
+      pts, netR: cum, maxDD, maxUWdays: maxUW / 86_400_000, n,
+      expectancy: cum / n,
+      winRate: (nWin / n) * 100,
+      winRateLong: lTot ? (lWin / lTot) * 100 : 0,
+      winRateShort: sTot ? (sWin / sTot) * 100 : 0,
+      avgWin: nWin ? sumWin / nWin : 0,
+      avgLoss: nLoss ? sumLoss / nLoss : 0,
+      profitFactor: sumLoss !== 0 ? sumWin / Math.abs(sumLoss) : 0,
+    };
+  }, [signals, rBasis]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!data) return null;
+  const W = 1000, H = 200, padT = 10, padB = 10;
+  const lo = Math.min(0, ...data.pts), hi = Math.max(0, ...data.pts);
+  const span = hi - lo || 1;
+  const xAt = (i: number) => (i / Math.max(data.pts.length - 1, 1)) * W;
+  const yAt = (c: number) => padT + (1 - (c - lo) / span) * (H - padT - padB);
+  const line = data.pts.map((c, i) => `${i === 0 ? "M" : "L"}${xAt(i).toFixed(1)},${yAt(c).toFixed(1)}`).join(" ");
+  const up = data.netR >= 0;
+  const stroke = up ? "#818cf8" : "#f87171";
+  const num = (v: number, d = 2) => v.toFixed(d);
+
+  const Metric = ({ label, value, tone }: { label: string; value: string; tone?: "pos" | "neg" }) => (
+    <div className="flex justify-between gap-2 py-1.5 border-b border-neutral-800/70">
+      <span className="text-neutral-500">{label}</span>
+      <span className={`font-medium tabular-nums ${tone === "pos" ? "text-emerald-400" : tone === "neg" ? "text-red-400" : "text-neutral-200"}`}>{value}</span>
+    </div>
+  );
+
+  return (
+    <section className="mb-4 rounded-md border border-neutral-800 bg-neutral-900/40 p-4">
+      <div className="flex items-baseline justify-between mb-2">
+        <h3 className="text-sm text-neutral-300">Equity curve <span className="text-neutral-600">· cumulative {rBasis === "exec" ? "executable" : "best-TP"} R</span></h3>
+        <span className={`text-sm font-medium tabular-nums ${up ? "text-emerald-400" : "text-red-400"}`}>{up ? "+" : ""}{num(data.netR, 1)}R net</span>
+      </div>
+      <div className="grid gap-4 lg:grid-cols-[2fr_1fr]">
+        <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="w-full h-44 rounded bg-neutral-950/50">
+          <line x1={0} y1={yAt(0)} x2={W} y2={yAt(0)} stroke="#3f3f46" strokeWidth={1} strokeDasharray="4 4" />
+          <path d={line} fill="none" stroke={stroke} strokeWidth={2} vectorEffect="non-scaling-stroke" />
+        </svg>
+        <div className="text-xs">
+          <Metric label="Closed trades" value={String(data.n)} />
+          <Metric label="Net (R)" value={`${up ? "+" : ""}${num(data.netR, 1)}`} tone={up ? "pos" : "neg"} />
+          <Metric label="Expectancy / trade" value={`${data.expectancy >= 0 ? "+" : ""}${num(data.expectancy, 3)}R`} tone={data.expectancy >= 0 ? "pos" : "neg"} />
+          <Metric label="Win-rate" value={`${num(data.winRate, 0)}%`} />
+          <Metric label="  · long / short" value={`${num(data.winRateLong, 0)}% / ${num(data.winRateShort, 0)}%`} />
+          <Metric label="Avg win | loss (R)" value={`+${num(data.avgWin)} | ${num(data.avgLoss)}`} />
+          <Metric label="Profit factor" value={num(data.profitFactor)} tone={data.profitFactor >= 1 ? "pos" : "neg"} />
+          <Metric label="Max drawdown (R)" value={`-${num(data.maxDD, 1)}`} tone="neg" />
+          <Metric label="Max underwater" value={`${num(data.maxUWdays, 1)} days`} />
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function PerformanceOverTime({ signals, rBasis }: { signals: SignalLog[]; rBasis: RBasis }) {
