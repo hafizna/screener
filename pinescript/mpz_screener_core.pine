@@ -53,6 +53,10 @@ gS    = "Direction"
 allowLong  = input.bool(true, "Allow longs", group=gS)
 allowShort = input.bool(true, "Allow shorts", group=gS)
 
+gF    = "Trend filter (approximates the screener's HTF bias gate)"
+useTrend  = input.bool(true, "Only trade WITH the trend", group=gF)
+trendLen  = input.int(200, "Trend EMA length", minval=20, group=gF)
+
 // ─── ATR ─────────────────────────────────────────────────────────────────────
 atr = ta.atr(atrLen)
 
@@ -127,12 +131,23 @@ volSd   = ta.stdev(volume, zLen)
 z  = volSd > 0 ? (volume - volMean) / volSd : 0.0
 zOk = z >= zMin
 
+// ─── Trend filter ────────────────────────────────────────────────────────────
+// Approximates the live screener's HTF bias gate: only buy dips when the trend is
+// up, only sell rallies when the trend is down. This turns the symmetric
+// mean-reversion fade (which gets run over in trends) into trend-aligned pullback
+// entries. Toggle off to reproduce the ungated bleed.
+trendEma  = ta.ema(close, trendLen)
+upTrend   = close > trendEma
+downTrend = close < trendEma
+trendLongOk  = not useTrend or upTrend
+trendShortOk = not useTrend or downTrend
+
 // ─── Entry signals: rejection at the value-area edges ────────────────────────
 tol = atr * tolATR
 longTouch  = not na(val) and low  <= val + tol and close > val   // dipped to VAL, closed back above
 shortTouch = not na(vah) and high >= vah - tol and close < vah   // spiked to VAH, closed back below
-longSig  = allowLong  and zOk and vwapOk and longTouch
-shortSig = allowShort and zOk and vwapOk and shortTouch
+longSig  = allowLong  and zOk and vwapOk and longTouch  and trendLongOk
+shortSig = allowShort and zOk and vwapOk and shortTouch and trendShortOk
 
 // ─── Position state machine ──────────────────────────────────────────────────
 var float eEntry = na
@@ -193,5 +208,6 @@ plot(vah, "VAH", color.new(color.red, 30), 1)
 plot(val, "VAL", color.new(color.green, 30), 1)
 plot(vwapW, "Weekly VWAP", color.new(color.blue, 20), 1)
 plot(vwapM, "Monthly VWAP", color.new(color.purple, 20), 1)
+plot(useTrend ? trendEma : na, "Trend EMA", color.new(color.gray, 40), 1)
 plotshape(longSig and strategy.position_size == 0, "Long", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.tiny)
 plotshape(shortSig and strategy.position_size == 0, "Short", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.tiny)
