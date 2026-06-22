@@ -290,6 +290,12 @@ function LifecycleBoard({
       if (!nearVwap) return false;
       if (t.side === "long" && dm != null && dm > 0) return false; // chasing above VWAP
     }
+    // Trend-alignment: only take entries WITH the ~33-day (4h) trend — a PineScript
+    // backtest showed the entry only has an edge with the longer trend, not against
+    // it. Long wants entry above the trend baseline, short below. Skipped when the
+    // column is absent (signals logged before this shipped).
+    const dt = t.dist_trend_pct;
+    if (dt != null && (t.side === "long" ? dt <= 0 : dt >= 0)) return false;
     return true;
   };
 
@@ -1306,7 +1312,7 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
     "from_watchlist", "tp2_source", "tp3_source", "outcome_detail",
     // Higher-TF anchored-VWAP distances (research; filled by /api/admin/vwap-research).
     "dist_vwap_weekly_pct", "dist_vwap_monthly_pct", "dist_vwap_pweek_pct", "dist_vwap_pmonth_pct",
-    "dist_vwap_quarter_pct", "dist_vwap_pquarter_pct",
+    "dist_vwap_quarter_pct", "dist_vwap_pquarter_pct", "dist_trend_pct",
   ];
   const num2 = (n: number) => Number(n.toFixed(2)); // dot decimal, no thousand separators
   const rows = signals.map((r) => {
@@ -1368,6 +1374,7 @@ function downloadHistoryCsv(signals: SignalLog[]): void {
       r.dist_vwap_pmonth_pct !== null ? num2(r.dist_vwap_pmonth_pct) : null,
       r.dist_vwap_quarter_pct !== null ? num2(r.dist_vwap_quarter_pct) : null,
       r.dist_vwap_pquarter_pct !== null ? num2(r.dist_vwap_pquarter_pct) : null,
+      r.dist_trend_pct !== null ? num2(r.dist_trend_pct) : null,
     ].map(csvField).join(",");
   });
   // UTF-8 BOM (﻿) so Excel reads Unicode correctly.

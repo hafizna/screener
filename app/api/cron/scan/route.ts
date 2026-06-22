@@ -151,6 +151,13 @@ export async function GET(req: NextRequest) {
     // Monthly VWAP from 4h klines (≈33 days, enough to anchor at the 1st). Powers
     // the board quality filter's confluence gate; costs no extra fetch.
     const vwapMonthly = monthlyVwap(fourHourKlines);
+    // 4h trend baseline = mean of the fetched 4h closes (≈33-day SMA). A
+    // PineScript backtest showed the price-structure entry only has an edge when
+    // taken WITH the longer trend (~33d), not against it; this logs each signal's
+    // signed distance from that baseline so the board can gate on trend-alignment.
+    const trend4h = fourHourKlines.length > 0
+      ? fourHourKlines.reduce((sum, k) => sum + k.close, 0) / fourHourKlines.length
+      : null;
 
     // Also detect 1H signals (free — klines already fetched above)
     const recentSignals1h = detectRecentSignals(symbol, "1h", oneHourKlines, RECENT_SIGNAL_BARS_1H);
@@ -215,6 +222,7 @@ export async function GET(req: NextRequest) {
             vwapMonthly,
             distVwapMonthlyPct: signedDistPct(entry, vwapMonthly) ?? undefined,
           } : {}),
+          ...(trend4h != null ? { distTrendPct: signedDistPct(entry, trend4h) ?? undefined } : {}),
           ...(relativeStrength !== undefined ? { relativeStrength, rsBias } : {}),
           squeezeScore,
           fromWatchlist,

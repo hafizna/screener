@@ -155,6 +155,7 @@ export async function ensureSchema() {
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_vwap_pmonth_pct REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_vwap_quarter_pct REAL`;
   await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_vwap_pquarter_pct REAL`;
+  await sql`ALTER TABLE signal_log ADD COLUMN IF NOT EXISTS dist_trend_pct REAL`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_outcome  ON signal_log(outcome)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_bar_time ON signal_log(bar_time DESC)`;
   await sql`CREATE INDEX IF NOT EXISTS idx_sl_symbol   ON signal_log(symbol)`;
@@ -282,7 +283,8 @@ export async function insertSignal(
        near_pdh, near_pdl, from_watchlist, bar_time, scanned_at,
        tp2_source, tp3_source, radar_first_seen,
        btc_return_15m_pct, btc_return_1h_pct, btc_realized_vol_24h_pct,
-       dist_vwap_weekly_pct, dist_vwap_monthly_pct, dist_vwap_pquarter_pct)
+       dist_vwap_weekly_pct, dist_vwap_monthly_pct, dist_vwap_pquarter_pct,
+       dist_trend_pct)
     VALUES (
       ${`${s.symbol}-${s.timeframe}-${s.barTime}`},
       ${s.symbol}, ${s.timeframe}, ${s.side},
@@ -307,7 +309,7 @@ export async function insertSignal(
       ${btc?.btcReturn15mPct ?? null}, ${btc?.btcReturn1hPct ?? null},
       ${btc?.btcRealizedVol24hPct ?? null},
       ${s.distVwapWeeklyPct ?? null}, ${s.distVwapMonthlyPct ?? null},
-      ${s.distVwapPquarterPct ?? null}
+      ${s.distVwapPquarterPct ?? null}, ${s.distTrendPct ?? null}
     )
     ON CONFLICT (id) DO NOTHING
     RETURNING id
@@ -397,6 +399,7 @@ export interface SignalLog {
   dist_vwap_pmonth_pct: number | null;
   dist_vwap_quarter_pct: number | null;
   dist_vwap_pquarter_pct: number | null;
+  dist_trend_pct: number | null;
 }
 
 function toNumber(value: unknown, fallback = 0): number {
@@ -492,6 +495,7 @@ function normalizeSignalLog(row: unknown): SignalLog {
     dist_vwap_pmonth_pct: toNullableNumber(r.dist_vwap_pmonth_pct),
     dist_vwap_quarter_pct: toNullableNumber(r.dist_vwap_quarter_pct),
     dist_vwap_pquarter_pct: toNullableNumber(r.dist_vwap_pquarter_pct),
+    dist_trend_pct: toNullableNumber(r.dist_trend_pct),
   };
 }
 

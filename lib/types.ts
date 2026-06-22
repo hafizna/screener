@@ -112,6 +112,9 @@ export interface Signal {
   // Signed % distance from the previous-quarter VWAP (pqVWAP). Computed only for
   // fired signals (one extra fetch each); powers the discretionary rejection badge.
   distVwapPquarterPct?: number;
+  // Signed % distance of entry from the ~33-day (4h) trend baseline. +ve = above
+  // trend. Drives the quality filter's trend-alignment gate (long wants +, short -).
+  distTrendPct?: number;
   // Which magnet each TP snapped to: "atr" (pure cap), "vwap_daily", "vwap_weekly".
   tp2Source?: "atr" | "vwap_daily" | "vwap_weekly";
   tp3Source?: "atr" | "vwap_daily" | "vwap_weekly";
