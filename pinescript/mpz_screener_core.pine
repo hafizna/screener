@@ -1,0 +1,197 @@
+//@version=5
+// ─────────────────────────────────────────────────────────────────────────────
+// MP+Z Screener — price-structure core (TradingView port)
+//
+// Faithful port of the screener's PRICE-STRUCTURE layer so you can backtest the
+// foundation over a long history (e.g. 1 year on BTCUSDT) and compare its equity
+// curve to buy-and-hold (TradingView's built-in benchmark when run on a BTC chart).
+//
+// WHAT THIS REPLICATES (matches the live screener):
+//   • Market profile POC / VAH / VAL over a rolling window (volume-at-price)
+//   • Anchored weekly + monthly VWAP (optional confluence gate)
+//   • Volume z-score "EX/LG" spike filter
+//   • Mean-reversion entries at the value-area edges (VAL=long, VAH=short)
+//   • ATR-based SL / TP1 / TP2 / TP3 and the trailing-SL state machine
+//       Phase0 SL=initial · Phase1 (TP1) SL=entry · Phase2 (TP2) SL=TP1 · TP3=close
+//     (toggle "TP2->TP2 lock" to test the tighter trail we analysed)
+//
+// WHAT IT CANNOT REPLICATE (TradingView limits — this is the "foundation only" test):
+//   • Funding / OI / long-short / RS confluence (no data access in Pine)
+//   • Cross-sectional top-N-by-volume selection (Pine is one chart at a time)
+//   • Exact UTC VWAP anchoring (uses chart timezone)
+// A good 1y result here validates the FOUNDATION; it does not prove the full edge.
+// ─────────────────────────────────────────────────────────────────────────────
+strategy("MP+Z Screener Core", overlay=true, initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     commission_type=strategy.commission.percent, commission_value=0.05,
+     pyramiding=0, process_orders_on_close=true, calc_on_every_tick=false)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+gMP   = "Market Profile"
+profileLen  = input.int(96, "Profile lookback (bars)", minval=20, group=gMP)
+bins        = input.int(50, "Profile bins", minval=10, maxval=100, group=gMP)
+vaPct       = input.float(0.70, "Value-area fraction", minval=0.5, maxval=0.9, step=0.05, group=gMP)
+tolATR      = input.float(0.25, "Edge touch tolerance (×ATR)", minval=0.05, step=0.05, group=gMP)
+
+gZ    = "Volume Z-score"
+zLen  = input.int(24, "Z baseline length", minval=10, group=gZ)
+zMin  = input.float(1.5, "Min volume z to fire", minval=0.5, step=0.1, group=gZ)
+
+gT    = "Targets / Risk (×ATR)"
+atrLen  = input.int(14, "ATR length", group=gT)
+slMult  = input.float(1.0, "SL ×ATR", step=0.1, group=gT)
+tp1Mult = input.float(1.5, "TP1 ×ATR", step=0.1, group=gT)
+tp2Mult = input.float(3.0, "TP2 ×ATR", step=0.1, group=gT)
+tp3Mult = input.float(5.0, "TP3 ×ATR", step=0.1, group=gT)
+trailMode = input.string("TP2->TP1 (current)", "After TP2, trail to", options=["TP2->TP1 (current)", "TP2->TP2 (lock)"], group=gT)
+
+gV    = "VWAP confluence gate (optional)"
+useVwapGate = input.bool(false, "Require entry near weekly/monthly VWAP", group=gV)
+vwapNearPct = input.float(0.75, "Near threshold (% of price)", step=0.05, group=gV)
+
+gS    = "Direction"
+allowLong  = input.bool(true, "Allow longs", group=gS)
+allowShort = input.bool(true, "Allow shorts", group=gS)
+
+// ─── ATR ─────────────────────────────────────────────────────────────────────
+atr = ta.atr(atrLen)
+
+// ─── Volume profile → POC / VAH / VAL (rolling window) ───────────────────────
+// hlc3-binning: each bar's volume drops into the bin holding its hlc3. POC = the
+// heaviest bin; the value area expands out from POC until it holds vaPct of total
+// volume. This approximates the screener's volume-at-price cheaply enough to run.
+var float poc = na
+var float vah = na
+var float val = na
+
+hh = ta.highest(high, profileLen)
+ll = ta.lowest(low, profileLen)
+binW = (hh - ll) / bins
+if binW > 0
+    vp = array.new_float(bins, 0.0)
+    for i = 0 to profileLen - 1
+        p = (high[i] + low[i] + close[i]) / 3
+        bi = math.max(0, math.min(bins - 1, int((p - ll) / binW)))
+        array.set(vp, bi, array.get(vp, bi) + volume[i])
+    pocBin = 0
+    maxV = 0.0
+    total = 0.0
+    for i = 0 to bins - 1
+        v = array.get(vp, i)
+        total += v
+        if v > maxV
+            maxV := v
+            pocBin := i
+    lowB = pocBin
+    highB = pocBin
+    acc = array.get(vp, pocBin)
+    target = total * vaPct
+    while acc < target and (lowB > 0 or highB < bins - 1)
+        upV = highB < bins - 1 ? array.get(vp, highB + 1) : -1.0
+        dnV = lowB > 0 ? array.get(vp, lowB - 1) : -1.0
+        if upV >= dnV
+            highB += 1
+            acc += math.max(upV, 0.0)
+        else
+            lowB -= 1
+            acc += math.max(dnV, 0.0)
+    poc := ll + (pocBin + 0.5) * binW
+    vah := ll + (highB + 1) * binW
+    val := ll + lowB * binW
+
+// ─── Anchored weekly / monthly VWAP ──────────────────────────────────────────
+var float wPV = 0.0
+var float wV  = 0.0
+var float mPV = 0.0
+var float mV  = 0.0
+if ta.change(weekofyear) != 0
+    wPV := 0.0
+    wV  := 0.0
+if ta.change(month) != 0
+    mPV := 0.0
+    mV  := 0.0
+tpx = hlc3
+wPV += tpx * volume
+wV  += volume
+mPV += tpx * volume
+mV  += volume
+vwapW = wV > 0 ? wPV / wV : na
+vwapM = mV > 0 ? mPV / mV : na
+
+nearVwap = (not na(vwapW) and math.abs(close - vwapW) / close * 100 <= vwapNearPct) or (not na(vwapM) and math.abs(close - vwapM) / close * 100 <= vwapNearPct)
+vwapOk = not useVwapGate or nearVwap
+
+// ─── Volume z-score ──────────────────────────────────────────────────────────
+volMean = ta.sma(volume, zLen)
+volSd   = ta.stdev(volume, zLen)
+z  = volSd > 0 ? (volume - volMean) / volSd : 0.0
+zOk = z >= zMin
+
+// ─── Entry signals: rejection at the value-area edges ────────────────────────
+tol = atr * tolATR
+longTouch  = not na(val) and low  <= val + tol and close > val   // dipped to VAL, closed back above
+shortTouch = not na(vah) and high >= vah - tol and close < vah   // spiked to VAH, closed back below
+longSig  = allowLong  and zOk and vwapOk and longTouch
+shortSig = allowShort and zOk and vwapOk and shortTouch
+
+// ─── Position state machine ──────────────────────────────────────────────────
+var float eEntry = na
+var float eSL = na
+var float eTP1 = na
+var float eTP2 = na
+var float eTP3 = na
+var int   stage = 0
+var int   dir = 0
+
+if longSig and strategy.position_size == 0
+    dir := 1
+    eEntry := close
+    eSL  := close - slMult * atr
+    eTP1 := close + tp1Mult * atr
+    eTP2 := close + tp2Mult * atr
+    eTP3 := close + tp3Mult * atr
+    stage := 0
+    strategy.entry("L", strategy.long)
+
+if shortSig and strategy.position_size == 0
+    dir := -1
+    eEntry := close
+    eSL  := close + slMult * atr
+    eTP1 := close - tp1Mult * atr
+    eTP2 := close - tp2Mult * atr
+    eTP3 := close - tp3Mult * atr
+    stage := 0
+    strategy.entry("S", strategy.short)
+
+if strategy.position_size != 0
+    // advance stage on TP touches (high/low), TP-before-trail like the screener
+    if dir == 1
+        if high >= eTP2
+            stage := math.max(stage, 2)
+        else if high >= eTP1
+            stage := math.max(stage, 1)
+    else
+        if low <= eTP2
+            stage := math.max(stage, 2)
+        else if low <= eTP1
+            stage := math.max(stage, 1)
+    // effective trailing stop by stage
+    effStop = eSL
+    if stage == 1
+        effStop := eEntry
+    else if stage == 2
+        effStop := trailMode == "TP2->TP2 (lock)" ? eTP2 : eTP1
+    // bracket: TP3 take-profit + the staged trailing stop, whichever hits first
+    if dir == 1
+        strategy.exit("Lx", from_entry="L", stop=effStop, limit=eTP3)
+    else
+        strategy.exit("Sx", from_entry="S", stop=effStop, limit=eTP3)
+
+// ─── Plots ───────────────────────────────────────────────────────────────────
+plot(poc, "POC", color.new(color.orange, 0), 2)
+plot(vah, "VAH", color.new(color.red, 30), 1)
+plot(val, "VAL", color.new(color.green, 30), 1)
+plot(vwapW, "Weekly VWAP", color.new(color.blue, 20), 1)
+plot(vwapM, "Monthly VWAP", color.new(color.purple, 20), 1)
+plotshape(longSig and strategy.position_size == 0, "Long", shape.triangleup, location.belowbar, color.new(color.green, 0), size=size.tiny)
+plotshape(shortSig and strategy.position_size == 0, "Short", shape.triangledown, location.abovebar, color.new(color.red, 0), size=size.tiny)
