@@ -275,29 +275,8 @@ function LifecycleBoard({
   // mean-reversion toward VWAP wins, chasing away from it loses. VWAP columns are
   // only present on signals fired after this shipped, so when they're null the
   // confluence checks are skipped (older live rows aren't penalised).
-  const VWAP_NEAR_PCT = 0.75;
-  const passesQuality = (t: BoardTrade): boolean => {
-    if (t.user_action === "enter") return true;
-    if (historySqueezeBucket(t) === "0" || historySqueezeBucket(t) === "none") return false;
-    if (t.signal_type === "bounce") return false;
-    if (historyConfidenceBucket(t) === "high" && t.regime === "breakout") return false;
-    const dw = t.dist_vwap_weekly_pct;
-    const dm = t.dist_vwap_monthly_pct;
-    if (dw != null || dm != null) {
-      const nearVwap =
-        (dw != null && Math.abs(dw) <= VWAP_NEAR_PCT) ||
-        (dm != null && Math.abs(dm) <= VWAP_NEAR_PCT);
-      if (!nearVwap) return false;
-      if (t.side === "long" && dm != null && dm > 0) return false; // chasing above VWAP
-    }
-    // Trend-alignment: only take entries WITH the ~33-day (4h) trend — a PineScript
-    // backtest showed the entry only has an edge with the longer trend, not against
-    // it. Long wants entry above the trend baseline, short below. Skipped when the
-    // column is absent (signals logged before this shipped).
-    const dt = t.dist_trend_pct;
-    if (dt != null && (t.side === "long" ? dt <= 0 : dt >= 0)) return false;
-    return true;
-  };
+  const passesQuality = (t: BoardTrade): boolean =>
+    t.user_action === "enter" || passesQualityFilter(t);
 
   const radar = (board?.radar ?? []).filter((r) =>
     sideOk(r.side) && (!qualityFilter || (r.squeeze_score != null && r.squeeze_score >= 1))
@@ -885,6 +864,31 @@ function TradeLifecycleBadge({ signal, currentPrice }: { signal: SignalLog; curr
 }
 
 
+// Shared quality gate: drops sqz=0 / bounce / high-conf breakout, requires the
+// entry to sit within 0.75% of the weekly/monthly VWAP (no long chasing above it),
+// and requires trend-alignment (long above / short below the ~33-day baseline).
+// VWAP/trend columns are null on older rows, so those checks are skipped there.
+// Used by the board toggle and the History quality view (the board adds its own
+// "entered trade always shown" exception on top).
+const QUALITY_VWAP_NEAR_PCT = 0.75;
+function passesQualityFilter(t: SignalLog): boolean {
+  if (historySqueezeBucket(t) === "0" || historySqueezeBucket(t) === "none") return false;
+  if (t.signal_type === "bounce") return false;
+  if (historyConfidenceBucket(t) === "high" && t.regime === "breakout") return false;
+  const dw = t.dist_vwap_weekly_pct;
+  const dm = t.dist_vwap_monthly_pct;
+  if (dw != null || dm != null) {
+    const nearVwap =
+      (dw != null && Math.abs(dw) <= QUALITY_VWAP_NEAR_PCT) ||
+      (dm != null && Math.abs(dm) <= QUALITY_VWAP_NEAR_PCT);
+    if (!nearVwap) return false;
+    if (t.side === "long" && dm != null && dm > 0) return false;
+  }
+  const dt = t.dist_trend_pct;
+  if (dt != null && (t.side === "long" ? dt <= 0 : dt >= 0)) return false;
+  return true;
+}
+
 function OutcomeBadge({ outcome }: { outcome: Outcome }) {
   const cfg: Record<Outcome, { label: string; cls: string }> = {
     tp3:     { label: "TP3 ✓",   cls: "bg-emerald-400   text-neutral-900 border-emerald-300" },
@@ -924,11 +928,16 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
   const [outcomeFilter, setOutcomeFilter] = useState<HistoryFilter>("all");
   const [confidenceFilter, setConfidenceFilter] = useState<HistoryConfidenceFilter>("all");
   const [rBasis, setRBasis] = useState<RBasis>("exec");
+  const [qualityOnly, setQualityOnly] = useState(false);
   if (loading) return <div className="text-neutral-500 text-sm py-12 text-center">Loading signal history…</div>;
   if (err)     return <div className="text-red-400 text-sm py-4">Error: {err}</div>;
   if (!history) return null;
 
-  const { signals, stats } = history;
+  // `qualityOnly` re-runs the whole History view (equity curve, breakdowns,
+  // stats) through the same gate as the board toggle, so you can see the FILTERED
+  // model's curve — not just the unfiltered firehose — on the real log.
+  const signals = qualityOnly ? history.signals.filter(passesQualityFilter) : history.signals;
+  const stats = history.stats;
   const resolved = stats.tp3 + stats.tp2 + stats.tp1 + stats.sl + stats.expired;
 
   // Plain computation (not a hook): this runs after the early returns above, so a
@@ -1016,6 +1025,10 @@ function HistoryTab({ history, loading, err }: { history: HistoryResult | null; 
         <FilterGroup label="R basis">
           <Chip active={rBasis === "exec"} onClick={() => setRBasis("exec")}>executable</Chip>
           <Chip active={rBasis === "bestTp"} onClick={() => setRBasis("bestTp")}>best TP</Chip>
+        </FilterGroup>
+        <FilterGroup label="Quality">
+          <Chip active={!qualityOnly} onClick={() => setQualityOnly(false)}>all</Chip>
+          <Chip active={qualityOnly} onClick={() => setQualityOnly(true)}>filtered</Chip>
         </FilterGroup>
         <div className="ml-auto text-sm text-neutral-400">
           {filteredSignals.length} row{filteredSignals.length === 1 ? "" : "s"}
