@@ -864,12 +864,16 @@ function TradeLifecycleBadge({ signal, currentPrice }: { signal: SignalLog; curr
 }
 
 
-// Shared quality gate: drops sqz=0 / bounce / high-conf breakout, requires the
-// entry to sit within 0.75% of the weekly/monthly VWAP (no long chasing above it),
-// and requires trend-alignment (long above / short below the ~33-day baseline).
-// VWAP/trend columns are null on older rows, so those checks are skipped there.
-// Used by the board toggle and the History quality view (the board adds its own
-// "entered trade always shown" exception on top).
+// Shared quality gate: drops sqz=0 / bounce / high-conf breakout, and requires the
+// entry to sit within 0.75% of the weekly/monthly VWAP (no long chasing above it).
+// VWAP columns are null on older rows, so that check is skipped there. Used by the
+// board toggle and the History quality view (the board adds its own "entered trade
+// always shown" exception on top).
+//
+// NOTE: trend-alignment (dist_trend_pct) was trialled here but REMOVED — it tested
+// well in a single-symbol PineScript backtest yet came out backwards on the live
+// forward week (trend-aligned -0.07R vs counter-trend +0.11R). The column is still
+// logged for research, but it no longer gates: we don't add filters that fail OOS.
 const QUALITY_VWAP_NEAR_PCT = 0.75;
 function passesQualityFilter(t: SignalLog): boolean {
   if (historySqueezeBucket(t) === "0" || historySqueezeBucket(t) === "none") return false;
@@ -884,8 +888,6 @@ function passesQualityFilter(t: SignalLog): boolean {
     if (!nearVwap) return false;
     if (t.side === "long" && dm != null && dm > 0) return false;
   }
-  const dt = t.dist_trend_pct;
-  if (dt != null && (t.side === "long" ? dt <= 0 : dt >= 0)) return false;
   return true;
 }
 
