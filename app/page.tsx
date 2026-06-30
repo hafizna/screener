@@ -727,6 +727,10 @@ function TradeCard({ row, stage, onAction, onSelectTrace }: {
         {stage === "fired" && <TradeLifecycleBadge signal={row} currentPrice={row.current_price} />}
       </div>
 
+      {/* Why this fired: which structural level it rejected from + the BTC regime
+          at fire time. Read-only annotation — does not affect signal logic. */}
+      <WhyFired triggerLevel={row.trigger_level} regime={row.regime} side={row.side} />
+
       <div className="flex justify-between text-neutral-500">
         <span>entry <span className="text-neutral-300">{formatPrice(row.entry_price)}</span></span>
         {row.current_price != null && !isResolved && (
@@ -756,7 +760,9 @@ function TradeCard({ row, stage, onAction, onSelectTrace }: {
 
       <div className="mt-1.5 flex items-center gap-3">
         <a href={tradingViewSymbolUrl(row.symbol, row.timeframe as Timeframe)} target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:text-blue-300">TV</a>
-        <a href={binanceFuturesUrl(row.symbol)} target="_blank" rel="noopener noreferrer" className="text-amber-400 hover:text-amber-300">BN</a>
+        {/* Binance link removed: binance.com is geo-blocked without VPN. Coinglass
+            is reachable and shows the same futures chart + funding/OI. */}
+        <a href={coinglassUrl(row.symbol)} target="_blank" rel="noopener noreferrer" className="text-amber-400 hover:text-amber-300">CG</a>
         {(stage === "fired" || stage === "running") && onAction && (
           <span className="inline-flex items-center gap-2">
             <button
@@ -2334,6 +2340,41 @@ function SqueezeBadge({ score }: { score: number }) {
   );
 }
 
+// Plain-language "why did this fire": the structural level the bar rejected from,
+// plus the BTC regime at fire time. Read-only — surfaces context already logged.
+// Level names map to what the bar touched (signals.ts): POC/VAL/VAH on the current
+// rolling profile, PREV_* on the prior day's. Short fades resistance (VAH/POC),
+// long bounces support (VAL/POC).
+function WhyFired({
+  triggerLevel, regime, side,
+}: { triggerLevel?: string | null; regime?: string | null; side: "long" | "short" }) {
+  if (!triggerLevel && !regime) return null;
+  const levelLabel: Record<string, string> = {
+    POC: "POC", VAL: "VAL (support)", VAH: "VAH (resist)",
+    PREV_POC: "prev POC", PREV_VAL: "prev VAL (support)", PREV_VAH: "prev VAH (resist)",
+  };
+  const lvl = triggerLevel ? (levelLabel[triggerLevel] ?? triggerLevel) : null;
+  const action = side === "short" ? "fade" : "bounce";
+  return (
+    <div className="mb-1.5 text-[10px] text-neutral-500 flex items-center gap-1.5 flex-wrap">
+      {lvl && (
+        <span title={`Bar rejected from ${triggerLevel} on the 15m profile (${action} setup)`}>
+          {action} {lvl}
+        </span>
+      )}
+      {lvl && regime && <span className="text-neutral-700">·</span>}
+      {regime && (
+        <span
+          className="text-neutral-400"
+          title="BTC 4H regime at fire time (drives the side playbook)"
+        >
+          {regime}
+        </span>
+      )}
+    </div>
+  );
+}
+
 // A "pqVWAP rejection" is a fade at the previous-quarter VWAP: entry within 1.5%
 // of pqVWAP, on the mean-reversion side (short at/above it, long at/below it).
 // Rare but high-value (in-sample short fades scored +0.79R, N=12 — discretionary,
@@ -2384,8 +2425,12 @@ function tradingViewSymbolUrl(symbol: string, timeframe: Timeframe): string {
   return `https://www.tradingview.com/chart/?symbol=BINANCE:${symbol}.P&interval=${interval}`;
 }
 
-function binanceFuturesUrl(symbol: string): string {
-  return `https://www.binance.com/en/futures/${symbol}`;
+// Coinglass futures page — reachable without VPN (binance.com is geo-blocked here,
+// replacing the old binanceFuturesUrl link). Strips the USDT quote since Coinglass
+// keys its pages by base symbol.
+function coinglassUrl(symbol: string): string {
+  const base = symbol.replace(/USDT$/, "");
+  return `https://www.coinglass.com/currencies/${base}`;
 }
 
 function GuideModal({ onClose }: { onClose: () => void }) {

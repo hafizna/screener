@@ -21,6 +21,7 @@ import { ensureSchema, insertSignal, getActiveSignals, updateOutcome, updateBest
 import { getBtcContextLive } from "@/lib/btc";
 import type { RadarUpsert } from "@/lib/db";
 import { resolveOutcome } from "@/lib/outcomes";
+import { postQualitySignals } from "@/lib/discord";
 import { MODEL_PARAMS_HASH, MODEL_VERSION } from "@/lib/model";
 
 export const maxDuration = 60;
@@ -323,6 +324,7 @@ export async function GET(req: NextRequest) {
   let dbSignalsPruned = 0;
   let dbFunnelLogged = false;
   let dbTraceSnapshotsInserted = 0;
+  let dbDiscordSent = 0;
   let dbError: string | undefined;
   try {
     await ensureSchema();
@@ -393,6 +395,17 @@ export async function GET(req: NextRequest) {
       return insertSignal(s, scanResult.scannedAt, regime, radarFirstSeen, btcContext);
     }));
     dbSignalsInserted = inserted.filter(Boolean).length;
+
+    // 7a-bis. Notify Discord of NEWLY-inserted quality signals only (so re-runs
+    //         don't double-post and the channel stays quality-gated). Fire-and-
+    //         forget: a webhook failure must not affect the scan outcome.
+    const newlyInserted = signals.filter((_, i) => Boolean(inserted[i]));
+    if (newlyInserted.length > 0) {
+      dbDiscordSent = await postQualitySignals(newlyInserted, regime).catch((e: Error) => {
+        console.warn("Discord notify failed:", e.message);
+        return 0;
+      });
+    }
 
     // 7b. Expire stale active signals (> 24h old, no level hit)
     await expireOldSignals();
@@ -467,6 +480,7 @@ export async function GET(req: NextRequest) {
     dbTraceSnapshotsInserted,
     dbOutcomesResolved,
     dbSignalsPruned,
+    dbDiscordSent,
     ...(dbError ? { dbError } : {}),
   });
 }
