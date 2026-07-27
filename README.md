@@ -44,6 +44,16 @@ Signals are only treated as actionable while they are recent and price remains c
 
 ## Deploy
 
+### Pause / resume the whole project from code
+
+`lib/project-state.ts` contains the repository-level `PROJECT_PAUSED` kill
+switch. When it is `true`, middleware stops all API routes before they can
+access Binance, Neon, Upstash, or Discord; `/api/cron/scan` returns a successful
+no-op so an external scheduler will not retry; and the dashboard serves static
+maintenance HTML without client-side polling.
+
+Set `PROJECT_PAUSED` to `false` and deploy to resume normal operation.
+
 ### 1. Provision Upstash Redis (free)
 
 Sign up at upstash.com, create a Redis database, copy the REST URL and REST token.
